@@ -1,5 +1,9 @@
 # 🦊 wazuh-cli
 
+<p align="center">
+<strong>Beta</strong>: This tool is in beta. Syntax coverage and lint rules are still limited. Expect breaking changes.
+</p>
+
 A command-line tool for the [Wazuh REST API](https://documentation.wazuh.com/current/user-manual/api/reference.html) (v4.x), written in Rust.
 
 ## Features
