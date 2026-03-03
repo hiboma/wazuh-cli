@@ -1,0 +1,16 @@
+# Rust / Cargo
+/target
+debug/
+**/*.rs.bk
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+
+# OS
+.DS_Store
+
+# Temporary files
+/tmp

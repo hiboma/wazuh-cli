@@ -1,0 +1,8 @@
+services:
+  wazuh-manager:
+    image: wazuh/wazuh-manager:4.9.0
+    ports:
+      - "55000:55000"
+    environment:
+      WAZUH_API_USER: wazuh
+      WAZUH_API_PASSWORD: wazuh

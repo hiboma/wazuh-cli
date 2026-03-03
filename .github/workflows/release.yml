@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions: {}
+
+jobs:
+  build-release:
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build (cross)
+        if: matrix.cross
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cross build --release --target "${BUILD_TARGET}"
+
+      - name: Build (native)
+        if: "!matrix.cross"
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: cargo build --release --target "${BUILD_TARGET}"
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          ARCHIVE_NAME="wazuh-cli-${TARGET}"
+          mkdir "${ARCHIVE_NAME}"
+          cp "target/${TARGET}/release/wazuh-cli" "${ARCHIVE_NAME}/"
+          cp LICENSE README.md "${ARCHIVE_NAME}/"
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: pwsh
+        run: |
+          $archiveName = "wazuh-cli-${env:TARGET}"
+          New-Item -ItemType Directory -Path $archiveName
+          Copy-Item "target\${env:TARGET}\release\wazuh-cli.exe" $archiveName
+          Copy-Item LICENSE, README.md $archiveName
+          Compress-Archive -Path $archiveName -DestinationPath "${archiveName}.zip"
+
+      - name: Upload artifact (unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: wazuh-cli-${{ matrix.target }}
+          path: wazuh-cli-${{ matrix.target }}.tar.gz
+
+      - name: Upload artifact (windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: wazuh-cli-${{ matrix.target }}
+          path: wazuh-cli-${{ matrix.target }}.zip
+
+  create-release:
+    needs: build-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} . \;
+          sha256sum wazuh-cli-* > sha256sums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/wazuh-cli-*.tar.gz
+            artifacts/wazuh-cli-*.zip
+            artifacts/sha256sums.txt
+
+  update-homebrew-tap:
+    needs: create-release
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: hiboma/homebrew-tap
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Update formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE_URL="https://github.com/hiboma/wazuh-cli/releases/download/${TAG}"
+
+          DARWIN_ARM64_URL="${BASE_URL}/wazuh-cli-aarch64-apple-darwin.tar.gz"
+          DARWIN_X86_64_URL="${BASE_URL}/wazuh-cli-x86_64-apple-darwin.tar.gz"
+          LINUX_ARM64_URL="${BASE_URL}/wazuh-cli-aarch64-unknown-linux-gnu.tar.gz"
+          LINUX_X86_64_URL="${BASE_URL}/wazuh-cli-x86_64-unknown-linux-gnu.tar.gz"
+
+          curl -sL "${BASE_URL}/sha256sums.txt" -o sha256sums.txt
+
+          DARWIN_ARM64_SHA=$(grep 'aarch64-apple-darwin' sha256sums.txt | awk '{print $1}')
+          DARWIN_X86_64_SHA=$(grep 'x86_64-apple-darwin' sha256sums.txt | awk '{print $1}')
+          LINUX_ARM64_SHA=$(grep 'aarch64-unknown-linux-gnu' sha256sums.txt | awk '{print $1}')
+          LINUX_X86_64_SHA=$(grep 'x86_64-unknown-linux-gnu' sha256sums.txt | awk '{print $1}')
+
+          cat > Formula/wazuh-cli.rb << RUBY
+          class WazuhCli < Formula
+            desc "CLI tool for the Wazuh REST API"
+            homepage "https://github.com/hiboma/wazuh-cli"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${DARWIN_ARM64_URL}"
+                sha256 "${DARWIN_ARM64_SHA}"
+              else
+                url "${DARWIN_X86_64_URL}"
+                sha256 "${DARWIN_X86_64_SHA}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${LINUX_ARM64_URL}"
+                sha256 "${LINUX_ARM64_SHA}"
+              else
+                url "${LINUX_X86_64_URL}"
+                sha256 "${LINUX_X86_64_SHA}"
+              end
+            end
+
+            def install
+              bin.install "wazuh-cli"
+            end
+
+            test do
+              assert_match "wazuh-cli", shell_output("#{bin}/wazuh-cli --help")
+            end
+          end
+          RUBY
+
+      - name: Commit and push
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/wazuh-cli.rb
+          git commit -m "Update wazuh-cli to ${TAG}"
+          git push
