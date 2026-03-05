@@ -1,6 +1,6 @@
 [package]
 name = "wazuh-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "A CLI tool for the Wazuh REST API"
@@ -18,6 +18,13 @@ thiserror = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = "z"
 
 [[test]]
 name = "integration"
