@@ -25,12 +25,25 @@ pub fn print_response(
     raw: bool,
 ) -> Result<(), WazuhError> {
     let output = if raw { value } else { extract_data(value) };
-    let formatted = serde_json::to_string_pretty(output).map_err(WazuhError::Json)?;
     let mut stdout = std::io::stdout().lock();
-    match writeln!(stdout, "{}", formatted) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(WazuhError::Io(e)),
+
+    if let Some(items) = output.as_array() {
+        for item in items {
+            let line = serde_json::to_string(item).map_err(WazuhError::Json)?;
+            match writeln!(stdout, "{}", line) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                Err(e) => return Err(WazuhError::Io(e)),
+            }
+        }
+        Ok(())
+    } else {
+        let formatted = serde_json::to_string_pretty(output).map_err(WazuhError::Json)?;
+        match writeln!(stdout, "{}", formatted) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(WazuhError::Io(e)),
+        }
     }
 }
 
