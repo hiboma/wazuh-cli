@@ -174,6 +174,12 @@ This is the mapping of all Wazuh API v4.x endpoints to their corresponding CLI c
 | GET | `/sca/{agent_id}` | `sca list <id>` |
 | GET | `/sca/{agent_id}/checks/{policy_id}` | `sca checks <id> <policy_id>` |
 
+### Extended Commands
+
+| CLI Command | Description |
+|---|---|
+| `agent sca <id>` | Fetches all SCA policies and their checks for an agent. Combines `sca list` and `sca checks` into a single command. |
+
 ## Syscheck
 
 | Method | Path | CLI Command |

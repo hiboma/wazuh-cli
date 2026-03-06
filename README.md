@@ -81,6 +81,14 @@ wazuh-cli agent list --raw
 | `overview` | Overview information |
 | `api-info` | API information |
 
+### Extended Commands
+
+Commands that combine multiple API calls for convenience. These do not map 1:1 to a REST API endpoint.
+
+| Command | Description |
+|---|---|
+| `agent sca <agent_id>` | Get all SCA policies and their checks for an agent |
+
 ## Configuration
 
 ### Environment variables
