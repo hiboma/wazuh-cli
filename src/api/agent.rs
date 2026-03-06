@@ -94,5 +94,47 @@ pub async fn run(client: &WazuhClient, cmd: AgentCommand) -> Result<Value, Wazuh
         }
         AgentAction::SummaryStatus => client.get("/agents/summary/status", &[]).await,
         AgentAction::SummaryOs => client.get("/agents/summary/os", &[]).await,
+        AgentAction::Sca { agent_id } => get_all_sca(client, &agent_id).await,
     }
+}
+
+async fn get_all_sca(client: &WazuhClient, agent_id: &str) -> Result<Value, WazuhError> {
+    let path = format!("/sca/{}", agent_id);
+    let policies_response = client.get(&path, &[]).await?;
+
+    let policies = policies_response
+        .pointer("/data/affected_items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut results = Vec::new();
+    for policy in &policies {
+        let policy_id = match policy.get("policy_id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let checks_path = format!("/sca/{}/checks/{}", agent_id, policy_id);
+        let checks_response = client.get_all_pages(&checks_path, &[], PAGE_SIZE).await?;
+
+        let checks = checks_response
+            .pointer("/data/affected_items")
+            .cloned()
+            .unwrap_or(Value::Array(vec![]));
+
+        let mut entry = policy.clone();
+        entry
+            .as_object_mut()
+            .unwrap()
+            .insert("checks".to_string(), checks);
+        results.push(entry);
+    }
+
+    Ok(json!({
+        "data": {
+            "affected_items": results,
+            "total_affected_items": results.len(),
+        }
+    }))
 }

@@ -48,6 +48,7 @@ wazuh-cli agent remove-group <agent_id> [<group_id>]
 wazuh-cli agent outdated
 wazuh-cli agent summary-status
 wazuh-cli agent summary-os
+wazuh-cli agent sca <agent_id>                        # [Extended]
 ```
 
 #### group
