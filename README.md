@@ -12,7 +12,7 @@ A command-line tool for the [Wazuh REST API](https://documentation.wazuh.com/cur
 - JWT authentication with automatic token refresh on 401
 - TLS and mutual TLS (mTLS) support
 - Automatic pagination for list endpoints
-- JSON output with `jq`-friendly defaults (extracts `data.affected_items`)
+- JSON Lines output for list results (`data.affected_items`), enabling line-oriented processing with `jq`, `grep`, `head`
 
 ## Installation
 
@@ -44,10 +44,16 @@ wazuh-cli <resource> <action> [options]
 ### Examples
 
 ```bash
-# List all agents
+# List all agents (JSON Lines output)
 wazuh-cli agent list
 
-# Get manager info
+# Filter with grep
+wazuh-cli agent list | grep active
+
+# Extract fields with jq
+wazuh-cli agent list | jq -r '.name'
+
+# Get manager info (pretty-printed JSON)
 wazuh-cli manager info
 
 # List security users

@@ -224,10 +224,25 @@ wazuh-cli api-info
 
 ### JSON (Default)
 
-Extracts `data.affected_items` and outputs it as JSON. When `--raw` is specified, the API response is output as-is. This is designed for use with `jq`.
+Extracts `data.affected_items` and outputs it. When the extracted data is an array, each element is output as a single-line JSON object (JSON Lines format). When the extracted data is not an array, it is output as pretty-printed JSON. When `--raw` is specified, the API response is output as-is in pretty-printed JSON.
+
+This design enables line-oriented processing with tools such as `jq`, `grep`, and `head`.
 
 ```
 wazuh-cli agent list -o json
+```
+
+Output example (JSON Lines):
+
+```
+{"id":"001","name":"agent1","status":"active"}
+{"id":"002","name":"agent2","status":"disconnected"}
+```
+
+```
+wazuh-cli agent list -o json | grep active
+wazuh-cli agent list -o json | jq -r '.name'
+wazuh-cli agent list -o json | head -5
 ```
 
 ### Table
@@ -268,6 +283,8 @@ By default, `data.affected_items` is extracted and output. The fallback order is
 1. If `data.affected_items` exists, it is output.
 2. If `data` exists, it is output.
 3. If neither exists, the original response is output as-is.
+
+When the extracted data is an array, each element is output as a single-line JSON object (JSON Lines format). When the extracted data is not an array (e.g. a single object from `agent get`), it is output as pretty-printed JSON.
 
 ### `--raw` Option
 
