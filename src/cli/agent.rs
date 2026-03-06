@@ -113,7 +113,11 @@ pub enum AgentAction {
     #[command(name = "summary-os")]
     SummaryOs,
 
-    /// Get all SCA policy checks for an agent (extended)
+    /// [Extended] Get all SCA policies and their checks for an agent
+    ///
+    /// Fetches all SCA policies via /sca/{agent_id}, then retrieves checks
+    /// for each policy via /sca/{agent_id}/checks/{policy_id}.
+    /// Returns a unified response with checks embedded in each policy.
     Sca {
         /// Agent ID
         agent_id: String,
