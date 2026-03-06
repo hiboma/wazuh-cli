@@ -112,4 +112,10 @@ pub enum AgentAction {
     /// Get agent OS summary
     #[command(name = "summary-os")]
     SummaryOs,
+
+    /// Get all SCA policy checks for an agent (extended)
+    Sca {
+        /// Agent ID
+        agent_id: String,
+    },
 }
