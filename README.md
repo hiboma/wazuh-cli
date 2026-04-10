@@ -120,8 +120,10 @@ source <(wazuh-cli completion zsh)
 
 ### bash
 
+The target directory depends on the distribution — `/usr/local/etc/bash_completion.d/` on Homebrew (macOS), `/etc/bash_completion.d/` on most Linux distributions, or `~/.local/share/bash-completion/completions/` for a per-user install.
+
 ```bash
-wazuh-cli completion bash > /usr/local/etc/bash_completion.d/wazuh-cli
+wazuh-cli completion bash > ~/.local/share/bash-completion/completions/wazuh-cli
 # Or for the current session:
 source <(wazuh-cli completion bash)
 ```
