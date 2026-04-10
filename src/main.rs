@@ -5,15 +5,45 @@ mod config;
 mod error;
 mod output;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
+use std::io::{self, Write};
 use std::process;
 
 use cli::{Cli, Command};
 use config::{CliOpts, Config};
 
+struct BrokenPipeTolerantStdout(io::Stdout);
+
+impl Write for BrokenPipeTolerantStdout {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.0.write(buf) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(buf.len()),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.0.flush() {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if let Command::Completion { shell } = cli.command {
+        let mut cmd = Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        let mut out = BrokenPipeTolerantStdout(io::stdout());
+        generate(shell, &mut cmd, bin_name, &mut out);
+        return;
+    }
 
     let cli_opts = CliOpts {
         api_url: cli.global.api_url,
@@ -77,5 +107,6 @@ async fn run(command: Command, config: &Config) -> Result<serde_json::Value, err
         Command::ActiveResponse(cmd) => api::active_response::run(&client, cmd).await,
         Command::Overview(cmd) => api::overview::run(&client, cmd).await,
         Command::ApiInfo => api::api_info::run(&client).await,
+        Command::Completion { .. } => unreachable!("handled before run()"),
     }
 }
