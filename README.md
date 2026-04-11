@@ -95,6 +95,45 @@ Commands that combine multiple API calls for convenience. These do not map 1:1 t
 |---|---|
 | `agent sca <agent_id>` | Get all SCA policies and their checks for an agent |
 
+## Shell completion
+
+`wazuh-cli completion <SHELL>` prints a completion script to stdout. Supported shells are `bash`, `zsh`, `fish`, `elvish`, and `powershell`.
+
+### zsh
+
+Save the script to a directory in your `fpath` and reload the completion system:
+
+```bash
+mkdir -p ~/.zfunc
+wazuh-cli completion zsh > ~/.zfunc/_wazuh-cli
+
+# Add to ~/.zshrc if not already present:
+#   fpath=(~/.zfunc $fpath)
+#   autoload -Uz compinit && compinit
+```
+
+Alternatively, source the script directly for the current session:
+
+```bash
+source <(wazuh-cli completion zsh)
+```
+
+### bash
+
+The target directory depends on the distribution — `/usr/local/etc/bash_completion.d/` on Homebrew (macOS), `/etc/bash_completion.d/` on most Linux distributions, or `~/.local/share/bash-completion/completions/` for a per-user install.
+
+```bash
+wazuh-cli completion bash > ~/.local/share/bash-completion/completions/wazuh-cli
+# Or for the current session:
+source <(wazuh-cli completion bash)
+```
+
+### fish
+
+```bash
+wazuh-cli completion fish > ~/.config/fish/completions/wazuh-cli.fish
+```
+
 ## Configuration
 
 ### Environment variables
