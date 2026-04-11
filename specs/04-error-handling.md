@@ -73,6 +73,8 @@ When the `error` field in the API response is `2` (partial success).
 | 2 | CLI input error |
 | 3 | Partial success |
 
+The `completion` subcommand never calls the Wazuh API and therefore always exits with 0 on success or 2 when clap rejects an unknown shell.
+
 ## Error Output Format
 
 Errors are output to standard error (stderr). When `--output json` is specified, errors are also output in JSON format.

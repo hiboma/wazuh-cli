@@ -28,6 +28,7 @@ fn root_help_contains_all_subcommands() {
         "active-response",
         "overview",
         "api-info",
+        "completion",
     ];
     for sub in &expected {
         assert!(help.contains(sub), "Root help missing subcommand: {}", sub);
@@ -138,6 +139,39 @@ fn security_help_contains_all_actions() {
 #[test]
 fn unknown_subcommand_exits_with_code_2() {
     let status = wazuh_cli().arg("nonexistent").status().unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn completion_generates_script_for_each_shell() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = wazuh_cli().args(["completion", shell]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "completion {shell} exited non-zero: {:?}",
+            output.status
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "completion {shell} produced empty stdout"
+        );
+    }
+}
+
+#[test]
+fn completion_zsh_has_compdef_header() {
+    let output = wazuh_cli().args(["completion", "zsh"]).output().unwrap();
+    assert!(output.status.success());
+    let script = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        script.starts_with("#compdef wazuh-cli"),
+        "zsh completion script should start with #compdef header"
+    );
+}
+
+#[test]
+fn completion_rejects_unknown_shell() {
+    let status = wazuh_cli().args(["completion", "ksh"]).status().unwrap();
     assert_eq!(status.code(), Some(2));
 }
 
