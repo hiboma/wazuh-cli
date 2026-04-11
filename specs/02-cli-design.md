@@ -218,7 +218,11 @@ wazuh-cli active-response run --agent <agent_id> --command <cmd>
 wazuh-cli overview agents
 
 wazuh-cli api-info
+
+wazuh-cli completion <shell>   # bash, zsh, fish, elvish, powershell
 ```
+
+The `completion` subcommand does not call the Wazuh API. It prints a shell completion script to stdout and exits. See README.md for installation examples.
 
 ## Output Formats
 

@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand};
+use clap_complete::Shell;
 
 pub mod agent;
 pub mod cluster;
@@ -135,4 +136,10 @@ pub enum Command {
     /// API information
     #[command(name = "api-info")]
     ApiInfo,
+
+    /// Generate shell completion script
+    Completion {
+        /// Target shell (bash, zsh, fish, elvish, powershell)
+        shell: Shell,
+    },
 }
