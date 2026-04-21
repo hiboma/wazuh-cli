@@ -58,7 +58,27 @@ fn main() {
             }
             return;
         }
+        #[cfg(target_os = "macos")]
         Command::Credentials(cmd) => {
+            // clap propagates `global = true` unconditionally, so the
+            // API-specific options (--api-url, --api-password, etc.)
+            // appear on `credentials`'s help even though they have no
+            // effect here. Warn loudly if a user passes one so the
+            // silent drop does not masquerade as success.
+            if cli.global.api_url.is_some()
+                || cli.global.api_user.is_some()
+                || cli.global.api_password.is_some()
+                || cli.global.ca_cert.is_some()
+                || cli.global.client_cert.is_some()
+                || cli.global.client_key.is_some()
+                || cli.global.insecure
+            {
+                eprintln!(
+                    "warning: API options (--api-url, --api-password, \
+                     --ca-cert, ...) have no effect on `credentials`. \
+                     Use --file / --stdin to provide the value to store."
+                );
+            }
             if let Err(e) = commands::credentials::run(cmd) {
                 output::print_error(&e);
                 process::exit(output::exit_code(&e));
@@ -154,8 +174,8 @@ async fn run(command: Command, config: &Config) -> Result<serde_json::Value, err
         Command::ActiveResponse(cmd) => api::active_response::run(&client, cmd).await,
         Command::Overview(cmd) => api::overview::run(&client, cmd).await,
         Command::ApiInfo => api::api_info::run(&client).await,
-        Command::Completion { .. } | Command::Credentials(_) => {
-            unreachable!("handled before run()")
-        }
+        Command::Completion { .. } => unreachable!("handled before run()"),
+        #[cfg(target_os = "macos")]
+        Command::Credentials(_) => unreachable!("handled before run()"),
     }
 }
