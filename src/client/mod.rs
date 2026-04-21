@@ -21,6 +21,31 @@ pub struct Credentials {
     pub password: String,
 }
 
+/// Zeroize the password on drop. The user name is not a secret and is
+/// left alone. This narrows the window where a core dump, swap-out, or
+/// panic-time backtrace of a still-running process could expose the
+/// plaintext — resolve-time `Zeroizing<String>` in the credential
+/// subcommand covers the ingest side, and this covers the runtime side.
+impl Drop for Credentials {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.password.zeroize();
+    }
+}
+
+/// Also zeroize the JWT we hold in memory. The Wazuh JWT is short-lived
+/// (default 900s) but until it expires it is bearer-equivalent.
+impl Drop for WazuhClient {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Ok(mut guard) = self.token.lock()
+            && let Some(t) = guard.as_mut()
+        {
+            t.zeroize();
+        }
+    }
+}
+
 impl WazuhClient {
     /// Builds a WazuhClient from Config.
     /// Creates an HTTP client with TLS/mTLS settings applied.
