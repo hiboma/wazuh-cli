@@ -136,6 +136,54 @@ wazuh-cli completion fish > ~/.config/fish/completions/wazuh-cli.fish
 
 ## Configuration
 
+### Credential storage (macOS Keychain)
+
+On macOS, `WAZUH_API_PASSWORD` can be stored in the login Keychain
+instead of an environment variable. The resolution order for the
+password is:
+
+1. `--api-password` CLI option
+2. `WAZUH_API_PASSWORD` environment variable
+3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+
+Storing the password in the Keychain keeps it out of plaintext config
+files, dotfile backups, Time Machine snapshots, and shell history, and
+prevents malware running as the same uid from reading it with a simple
+file read.
+
+```bash
+# Prompt for the password (hidden input) and store it:
+wazuh-cli credentials set api-password
+
+# Or read from stdin (pipe-friendly):
+printf '%s' "$PASSWORD" | wazuh-cli credentials set api-password --stdin
+
+# See whether a password is stored (value is NOT printed):
+wazuh-cli credentials status
+
+# Remove the entry:
+wazuh-cli credentials delete api-password
+```
+
+There is intentionally no `credentials get` subcommand. The value never
+has to leave the Keychain for any legitimate workflow; exposing one
+would invite leakage into shell history, terminal scrollback, and
+AI-agent transcripts.
+
+#### Notes on Keychain prompts
+
+- The first Keychain read prompts the user. Clicking "Always Allow"
+  pins the entry and suppresses further prompts.
+- The ACL is tied to the binary's code signature. Rebuilding wazuh-cli
+  (e.g. via `cargo install`) re-signs the binary with a different
+  identity, which will cause the Keychain to prompt again on the next
+  access. If `credentials status` reports an error, open
+  **Keychain Access.app**, find the `dev.wazuh-cli` entry, and re-grant
+  access via the **Access Control** tab (or delete and re-store the
+  entry with `credentials set api-password`).
+- On non-macOS builds the Keychain backend is absent; resolution uses
+  CLI + env var only.
+
 ### Environment variables
 
 | Variable | Description | Default |

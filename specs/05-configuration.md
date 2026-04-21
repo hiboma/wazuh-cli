@@ -5,8 +5,11 @@
 Configuration for `wazuh-cli` is resolved in the following order of precedence.
 
 ```
-CLI options > Environment variables > Configuration file > Default values
+CLI options > Environment variables > Credential store (macOS Keychain, api_password only) > Configuration file > Default values
 ```
+
+The credential store tier only applies to `api_password`. Other settings
+(URL, user, cert paths, etc.) do not read from the Keychain.
 
 ## Environment Variables
 
@@ -56,3 +59,40 @@ timeout = 30
 ### Prototype Phase
 
 Configuration file support is not implemented during the prototype phase. Only environment variables and CLI options are functional.
+
+## Credential store (macOS Keychain)
+
+`api_password` can be sourced from the macOS login Keychain. Management
+is exposed as a subcommand:
+
+```
+wazuh-cli credentials set api-password
+wazuh-cli credentials set api-password --stdin
+wazuh-cli credentials delete api-password
+wazuh-cli credentials status
+```
+
+The entry is stored under service `dev.wazuh-cli`, account
+`api_password`. There is intentionally no `credentials get`: the value
+never has to leave the Keychain for any legitimate workflow, and
+exposing one would invite leakage into shell history, terminal
+scrollback, and AI-agent transcripts.
+
+### Store error semantics
+
+The store returns one of two error classes:
+
+- `Unavailable` — no credential backend on this host (non-macOS build,
+  or macOS with no default keychain). Resolution silently falls through
+  to the next tier. This preserves the previous env-only behavior for
+  users who never opt into the Keychain.
+- `Backend` — a real access failure (denied prompt, ACL mismatch,
+  daemon down). Resolution **does not** fall through. The error is
+  surfaced so the user investigates, rather than silently running
+  against an empty / stale password.
+
+### Non-macOS
+
+Non-macOS builds compile without the `keyring` / `security-framework`
+dependencies. `credentials` subcommands return an `Unavailable` error,
+and resolution of `api_password` uses only CLI + env var.
