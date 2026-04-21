@@ -3,6 +3,7 @@ use clap_complete::Shell;
 
 pub mod agent;
 pub mod cluster;
+pub mod credentials;
 pub mod decoder;
 pub mod group;
 pub mod manager;
@@ -136,6 +137,9 @@ pub enum Command {
     /// API information
     #[command(name = "api-info")]
     ApiInfo,
+
+    /// Manage credentials stored in the macOS Keychain
+    Credentials(credentials::CredentialsCommand),
 
     /// Generate shell completion script
     Completion {
