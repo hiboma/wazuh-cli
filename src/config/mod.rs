@@ -1,5 +1,7 @@
 use std::fmt;
 
+use zeroize::Zeroizing;
+
 use crate::error::WazuhError;
 
 pub mod credential_store;
@@ -25,7 +27,11 @@ pub struct CliOpts {
 pub struct Config {
     pub api_url: String,
     pub api_user: String,
-    pub api_password: String,
+    /// Wrapped in `Zeroizing` so the heap allocation is wiped when
+    /// `Config` drops. The `String` inside is only ever cloned into
+    /// another `Zeroizing<String>` (see `Credentials.password`), so
+    /// plaintext copies do not leak into unmanaged heap.
+    pub api_password: Zeroizing<String>,
     pub ca_cert: Option<String>,
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
@@ -150,24 +156,27 @@ impl Config {
 fn resolve_api_password(
     cli_value: &Option<String>,
     store: &dyn CredentialStore,
-) -> Result<String, WazuhError> {
+) -> Result<Zeroizing<String>, WazuhError> {
     if let Some(v) = cli_value {
-        return Ok(v.clone());
+        return Ok(Zeroizing::new(v.clone()));
     }
 
     if let Ok(v) = std::env::var("WAZUH_API_PASSWORD")
         && !v.is_empty()
     {
-        return Ok(v);
+        // Move the env-var value into a Zeroizing<String>. `std::env::var`
+        // returns a fresh heap `String`; we own it here and wipe it on
+        // drop rather than leaving it as an un-zeroized plaintext copy.
+        return Ok(Zeroizing::new(v));
     }
 
     match store.get(KEY_API_PASSWORD) {
-        Ok(Some(v)) => Ok(v),
-        Ok(None) => Ok(String::new()),
-        Err(StoreError::Unavailable(_)) => Ok(String::new()),
-        Err(StoreError::Backend(msg)) => Err(WazuhError::Config(format!(
-            "credential store access failed: {}. Run `wazuh-cli credentials status` for guidance, \
-             or set WAZUH_API_PASSWORD to bypass the store.",
+        Ok(Some(v)) => Ok(Zeroizing::new(v)),
+        Ok(None) => Ok(Zeroizing::new(String::new())),
+        Err(StoreError::Unavailable(_)) => Ok(Zeroizing::new(String::new())),
+        Err(StoreError::Backend(msg)) => Err(WazuhError::CredentialStore(format!(
+            "{}. Run `wazuh-cli credentials status` for guidance, or set \
+             WAZUH_API_PASSWORD to bypass the store.",
             msg
         ))),
     }
@@ -259,7 +268,7 @@ fn resolve_timeout(cli_value: Option<u64>) -> Result<u64, WazuhError> {
 
 #[cfg(test)]
 mod tests {
-    use super::credential_store::MemoryStore;
+    use super::credential_store::{FailingStore, MemoryStore};
     use super::*;
 
     fn default_cli_opts() -> CliOpts {
@@ -285,7 +294,7 @@ mod tests {
 
         assert_eq!(config.api_url, "https://localhost:55000");
         assert_eq!(config.api_user, "wazuh");
-        assert_eq!(config.api_password, "");
+        assert_eq!(config.api_password.as_str(), "");
         assert!(!config.insecure);
         assert_eq!(config.timeout, 30);
         assert!(config.ca_cert.is_none());
@@ -312,7 +321,7 @@ mod tests {
 
         assert_eq!(config.api_url, "https://custom:9200");
         assert_eq!(config.api_user, "admin");
-        assert_eq!(config.api_password, "secret");
+        assert_eq!(config.api_password.as_str(), "secret");
         assert_eq!(config.ca_cert.unwrap(), "/path/to/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/path/to/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/path/to/key.pem");
@@ -347,7 +356,7 @@ mod tests {
 
         assert_eq!(config.api_url, "https://env-host:55000");
         assert_eq!(config.api_user, "env_user");
-        assert_eq!(config.api_password, "env_pass");
+        assert_eq!(config.api_password.as_str(), "env_pass");
         assert_eq!(config.ca_cert.unwrap(), "/env/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/env/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/env/key.pem");
@@ -524,7 +533,7 @@ mod tests {
         let cli = default_cli_opts();
         let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
 
-        assert_eq!(config.api_password, "from-keychain");
+        assert_eq!(config.api_password.as_str(), "from-keychain");
     }
 
     #[test]
@@ -541,7 +550,7 @@ mod tests {
         let cli = default_cli_opts();
         let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
 
-        assert_eq!(config.api_password, "from-env");
+        assert_eq!(config.api_password.as_str(), "from-env");
 
         unsafe {
             std::env::remove_var("WAZUH_API_PASSWORD");
@@ -565,7 +574,49 @@ mod tests {
         };
         let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
 
-        assert_eq!(config.api_password, "from-cli");
+        assert_eq!(config.api_password.as_str(), "from-cli");
+
+        unsafe {
+            std::env::remove_var("WAZUH_API_PASSWORD");
+        }
+    }
+
+    #[test]
+    fn test_credential_store_backend_error_propagates_and_not_fallthrough() {
+        // No CLI, no env -> would normally fall through to the store.
+        // The store returns Backend, which must surface as a
+        // CredentialStore error (NOT silently produce an empty
+        // password), so users notice the Keychain ACL denial rather
+        // than running against an empty secret.
+        unsafe {
+            std::env::remove_var("WAZUH_API_PASSWORD");
+        }
+
+        let store = FailingStore::backend();
+        let cli = default_cli_opts();
+        let err = Config::from_cli_env_and_store(&cli, &store).unwrap_err();
+        match err {
+            WazuhError::CredentialStore(msg) => {
+                assert!(msg.contains("simulated backend failure"));
+                assert!(msg.contains("WAZUH_API_PASSWORD"));
+            }
+            other => panic!("expected CredentialStore error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_credential_store_backend_does_not_swallow_when_env_set() {
+        // If WAZUH_API_PASSWORD is set, resolve() should use it and
+        // never even consult the store — so a Backend error must not
+        // surface in that case. This pins the "env > store" priority.
+        unsafe {
+            std::env::set_var("WAZUH_API_PASSWORD", "from-env-bypass");
+        }
+
+        let store = FailingStore::backend();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+        assert_eq!(config.api_password.as_str(), "from-env-bypass");
 
         unsafe {
             std::env::remove_var("WAZUH_API_PASSWORD");
@@ -577,7 +628,7 @@ mod tests {
         let config = Config {
             api_url: "https://x".to_string(),
             api_user: "u".to_string(),
-            api_password: "super-secret".to_string(),
+            api_password: "super-secret".to_string().into(),
             ca_cert: None,
             client_cert: None,
             client_key: None,
@@ -597,7 +648,7 @@ mod tests {
         let config = Config {
             api_url: "https://x".to_string(),
             api_user: "u".to_string(),
-            api_password: String::new(),
+            api_password: Zeroizing::new(String::new()),
             ca_cert: None,
             client_cert: None,
             client_key: None,
