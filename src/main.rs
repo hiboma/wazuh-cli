@@ -1,6 +1,7 @@
 mod api;
 mod cli;
 mod client;
+mod commands;
 mod config;
 mod error;
 mod output;
@@ -42,17 +43,29 @@ impl Write for BrokenPipeTolerantStdout<'_> {
 async fn main() {
     let cli = Cli::parse();
 
-    if let Command::Completion { shell } = cli.command {
-        let mut cmd = Cli::command();
-        let bin_name = cmd.get_name().to_string();
-        let stdout = io::stdout();
-        let mut out = BrokenPipeTolerantStdout(stdout.lock());
-        generate(shell, &mut cmd, bin_name, &mut out);
-        if let Err(e) = out.flush() {
-            eprintln!("error: failed to flush stdout: {e}");
-            process::exit(1);
+    // Subcommands that do not talk to the Wazuh API are handled before
+    // building the API client.
+    match cli.command {
+        Command::Completion { shell } => {
+            let mut cmd = Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            let stdout = io::stdout();
+            let mut out = BrokenPipeTolerantStdout(stdout.lock());
+            generate(shell, &mut cmd, bin_name, &mut out);
+            if let Err(e) = out.flush() {
+                eprintln!("error: failed to flush stdout: {e}");
+                process::exit(1);
+            }
+            return;
         }
-        return;
+        Command::Credentials(cmd) => {
+            if let Err(e) = commands::credentials::run(cmd) {
+                output::print_error(&e);
+                process::exit(output::exit_code(&e));
+            }
+            return;
+        }
+        _ => {}
     }
 
     let cli_opts = CliOpts {
@@ -117,6 +130,8 @@ async fn run(command: Command, config: &Config) -> Result<serde_json::Value, err
         Command::ActiveResponse(cmd) => api::active_response::run(&client, cmd).await,
         Command::Overview(cmd) => api::overview::run(&client, cmd).await,
         Command::ApiInfo => api::api_info::run(&client).await,
-        Command::Completion { .. } => unreachable!("handled before run()"),
+        Command::Completion { .. } | Command::Credentials(_) => {
+            unreachable!("handled before run()")
+        }
     }
 }
