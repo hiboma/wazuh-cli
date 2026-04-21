@@ -4,4 +4,5 @@
 //! as `credentials` (which talks to the macOS Keychain, not the Wazuh
 //! server) live here.
 
+#[cfg(target_os = "macos")]
 pub mod credentials;
