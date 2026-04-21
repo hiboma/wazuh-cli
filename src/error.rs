@@ -6,6 +6,14 @@ pub enum WazuhError {
     #[error("Configuration error: {0}")]
     Config(String),
 
+    /// An error from the credential store (macOS Keychain) that is
+    /// distinct from a general configuration error. Kept as a separate
+    /// variant so downstream code (and messages to the user) can point
+    /// at Keychain Access.app rather than at env vars / config files.
+    /// Exit code is still 1 per `specs/04-error-handling.md`.
+    #[error("Credential store error: {0}")]
+    CredentialStore(String),
+
     #[error("Authentication error: {0}")]
     Auth(String),
 
