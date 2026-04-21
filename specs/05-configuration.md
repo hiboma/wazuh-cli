@@ -68,9 +68,15 @@ is exposed as a subcommand:
 ```
 wazuh-cli credentials set api-password
 wazuh-cli credentials set api-password --stdin
+wazuh-cli credentials set api-password --file <PATH>   # mode must be 0o6xx
 wazuh-cli credentials delete api-password
-wazuh-cli credentials status
+wazuh-cli credentials status                           # human-readable TSV
+wazuh-cli credentials status --json                    # machine-readable
 ```
+
+`set` strips a single trailing `\r` / `\n` / `\r\n` from the input.
+Plain trailing spaces and other whitespace are preserved byte-for-byte
+so a real trailing space in a password is not silently mangled.
 
 The entry is stored under service `dev.wazuh-cli`, account
 `api_password`. There is intentionally no `credentials get`: the value
