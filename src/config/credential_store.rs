@@ -213,6 +213,36 @@ impl CredentialStore for MemoryStore {
     }
 }
 
+/// Test-only store that always returns `Backend` / `Unavailable`
+/// errors. Lets us exercise the error-propagation paths without
+/// constructing a real `keyring::Error`.
+#[cfg(test)]
+pub struct FailingStore {
+    pub err: fn() -> StoreError,
+}
+
+#[cfg(test)]
+impl FailingStore {
+    pub fn backend() -> Self {
+        Self {
+            err: || StoreError::Backend("simulated backend failure".to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl CredentialStore for FailingStore {
+    fn get(&self, _key: &str) -> Result<Option<String>, StoreError> {
+        Err((self.err)())
+    }
+    fn set(&self, _key: &str, _value: &str) -> Result<(), StoreError> {
+        Err((self.err)())
+    }
+    fn delete(&self, _key: &str) -> Result<(), StoreError> {
+        Err((self.err)())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +299,31 @@ mod tests {
         let kr = keyring::Error::PlatformFailure(Box::new(sf));
         match super::keychain::classify_keyring_err(kr) {
             StoreError::Backend(_) => {}
+            other => panic!("expected Backend, got {:?}", other),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn classify_keyring_err_recognizes_invalid_keychain_by_osstatus() {
+        // errSecInvalidKeychain: the keychain exists but is not
+        // usable (e.g. corrupt or not unlocked). Treated as
+        // Unavailable so resolve() falls through to env/CLI rather
+        // than blocking the user on a broken keychain file.
+        let sf =
+            security_framework::base::Error::from_code(super::keychain::ERR_SEC_INVALID_KEYCHAIN);
+        let kr = keyring::Error::PlatformFailure(Box::new(sf));
+        match super::keychain::classify_keyring_err(kr) {
+            StoreError::Unavailable(_) => {}
+            other => panic!("expected Unavailable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn failing_store_propagates_backend_error() {
+        let s = FailingStore::backend();
+        match s.get("k") {
+            Err(StoreError::Backend(_)) => {}
             other => panic!("expected Backend, got {:?}", other),
         }
     }
