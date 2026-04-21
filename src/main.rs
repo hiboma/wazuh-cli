@@ -39,12 +39,12 @@ impl Write for BrokenPipeTolerantStdout<'_> {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     let cli = Cli::parse();
 
-    // Subcommands that do not talk to the Wazuh API are handled before
-    // building the API client.
+    // Subcommands that do not talk to the Wazuh API do not need a tokio
+    // runtime and must run before any credential resolution that would
+    // otherwise require API config. Handle them here.
     match cli.command {
         Command::Completion { shell } => {
             let mut cmd = Cli::command();
@@ -90,7 +90,31 @@ async fn main() {
         }
     };
 
-    let result = run(cli.command, &config).await;
+    // Scrub WAZUH_API_PASSWORD from this process's environment
+    // immediately after resolution. Once it is held in `Config` we no
+    // longer need the env var, and leaving it behind exposes the
+    // plaintext via `ps -E` / `/proc/<pid>/environ` for the lifetime of
+    // the process. Run while we are still single-threaded (before the
+    // tokio runtime is created).
+    //
+    // SAFETY: single-threaded context; no other thread observes env
+    // mutations at this point in startup.
+    unsafe {
+        std::env::remove_var("WAZUH_API_PASSWORD");
+    }
+
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: failed to build tokio runtime: {e}");
+            process::exit(1);
+        }
+    };
+
+    let result = runtime.block_on(run(cli.command, &config));
 
     match result {
         Ok(value) => {

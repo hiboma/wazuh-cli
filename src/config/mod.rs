@@ -1,4 +1,10 @@
+use std::fmt;
+
 use crate::error::WazuhError;
+
+pub mod credential_store;
+
+use credential_store::{CredentialStore, KEY_API_PASSWORD, StoreError, default_store};
 
 /// Struct corresponding to CLI global options.
 /// Each field is Option-typed; None falls back to environment variable, then default value.
@@ -30,6 +36,34 @@ pub struct Config {
     pub timeout: u64,
 }
 
+/// Hand-written `Debug` impl that masks the API password. Auto-derived
+/// `Debug` would dump the plaintext into logs / panic backtraces / any
+/// `{:?}` format call, which is a common accidental leakage path.
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("api_url", &self.api_url)
+            .field("api_user", &self.api_user)
+            .field(
+                "api_password",
+                &if self.api_password.is_empty() {
+                    "(empty)"
+                } else {
+                    "***"
+                },
+            )
+            .field("ca_cert", &self.ca_cert)
+            .field("client_cert", &self.client_cert)
+            .field("client_key", &self.client_key)
+            .field("insecure", &self.insecure)
+            .field("output_format", &self.output_format)
+            .field("raw_output", &self.raw_output)
+            .field("progress", &self.progress)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum OutputFormat {
     #[default]
@@ -37,9 +71,24 @@ pub enum OutputFormat {
 }
 
 impl Config {
-    /// Builds Config from CLI options and environment variables.
-    /// Priority: CLI options > environment variables > default values
+    /// Builds Config from CLI options and environment variables,
+    /// consulting the platform default credential store (macOS
+    /// Keychain) as the last-resort source for the API password.
+    ///
+    /// Priority: CLI options > environment variables > credential
+    /// store > default values.
     pub fn from_cli_and_env(cli: &CliOpts) -> Result<Config, WazuhError> {
+        Self::from_cli_env_and_store(cli, default_store().as_ref())
+    }
+
+    /// Same as `from_cli_and_env`, but with an injectable credential
+    /// store. Exists so tests can exercise the Keychain fall-through
+    /// without touching the real Keychain, and so the caller can
+    /// substitute `UnavailableStore` in hostile contexts.
+    pub fn from_cli_env_and_store(
+        cli: &CliOpts,
+        store: &dyn CredentialStore,
+    ) -> Result<Config, WazuhError> {
         let api_url = resolve_string(
             &cli.api_url,
             "WAZUH_API_URL",
@@ -48,7 +97,7 @@ impl Config {
 
         let api_user = resolve_string(&cli.api_user, "WAZUH_API_USER", Some("wazuh"))?;
 
-        let api_password = resolve_string(&cli.api_password, "WAZUH_API_PASSWORD", None)?;
+        let api_password = resolve_api_password(&cli.api_password, store)?;
 
         let ca_cert = resolve_optional_string(&cli.ca_cert, "WAZUH_CA_CERT");
         let client_cert = resolve_optional_string(&cli.client_cert, "WAZUH_CLIENT_CERT");
@@ -89,6 +138,38 @@ impl Config {
             progress,
             timeout,
         })
+    }
+}
+
+/// Resolve the API password in priority order: CLI > env > credential
+/// store. The store's `Unavailable` is treated as "no answer here, try
+/// the next tier" (so users who never opted into the Keychain still
+/// get the previous env-only behavior); `Backend` is surfaced as a
+/// hard error to avoid silently falling through to a stale source
+/// after a Keychain ACL denial.
+fn resolve_api_password(
+    cli_value: &Option<String>,
+    store: &dyn CredentialStore,
+) -> Result<String, WazuhError> {
+    if let Some(v) = cli_value {
+        return Ok(v.clone());
+    }
+
+    if let Ok(v) = std::env::var("WAZUH_API_PASSWORD")
+        && !v.is_empty()
+    {
+        return Ok(v);
+    }
+
+    match store.get(KEY_API_PASSWORD) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Ok(String::new()),
+        Err(StoreError::Unavailable(_)) => Ok(String::new()),
+        Err(StoreError::Backend(msg)) => Err(WazuhError::Config(format!(
+            "credential store access failed: {}. Run `wazuh-cli credentials status` for guidance, \
+             or set WAZUH_API_PASSWORD to bypass the store.",
+            msg
+        ))),
     }
 }
 
@@ -178,6 +259,7 @@ fn resolve_timeout(cli_value: Option<u64>) -> Result<u64, WazuhError> {
 
 #[cfg(test)]
 mod tests {
+    use super::credential_store::MemoryStore;
     use super::*;
 
     fn default_cli_opts() -> CliOpts {
@@ -204,7 +286,7 @@ mod tests {
         assert_eq!(config.api_url, "https://localhost:55000");
         assert_eq!(config.api_user, "wazuh");
         assert_eq!(config.api_password, "");
-        assert_eq!(config.insecure, false);
+        assert!(!config.insecure);
         assert_eq!(config.timeout, 30);
         assert!(config.ca_cert.is_none());
         assert!(config.client_cert.is_none());
@@ -234,7 +316,7 @@ mod tests {
         assert_eq!(config.ca_cert.unwrap(), "/path/to/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/path/to/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/path/to/key.pem");
-        assert_eq!(config.insecure, true);
+        assert!(config.insecure);
         assert_eq!(config.timeout, 60);
     }
 
@@ -425,5 +507,108 @@ mod tests {
         unsafe {
             std::env::remove_var("WAZUH_API_URL");
         }
+    }
+
+    #[test]
+    fn test_api_password_from_credential_store_when_env_unset() {
+        // No CLI, no env -> should fall through to the credential store.
+        unsafe {
+            std::env::remove_var("WAZUH_API_PASSWORD");
+        }
+
+        let store = MemoryStore::new();
+        store
+            .set(credential_store::KEY_API_PASSWORD, "from-keychain")
+            .unwrap();
+
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+
+        assert_eq!(config.api_password, "from-keychain");
+    }
+
+    #[test]
+    fn test_env_wins_over_credential_store() {
+        unsafe {
+            std::env::set_var("WAZUH_API_PASSWORD", "from-env");
+        }
+
+        let store = MemoryStore::new();
+        store
+            .set(credential_store::KEY_API_PASSWORD, "from-keychain")
+            .unwrap();
+
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+
+        assert_eq!(config.api_password, "from-env");
+
+        unsafe {
+            std::env::remove_var("WAZUH_API_PASSWORD");
+        }
+    }
+
+    #[test]
+    fn test_cli_wins_over_env_and_credential_store() {
+        unsafe {
+            std::env::set_var("WAZUH_API_PASSWORD", "from-env");
+        }
+
+        let store = MemoryStore::new();
+        store
+            .set(credential_store::KEY_API_PASSWORD, "from-keychain")
+            .unwrap();
+
+        let cli = CliOpts {
+            api_password: Some("from-cli".to_string()),
+            ..default_cli_opts()
+        };
+        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+
+        assert_eq!(config.api_password, "from-cli");
+
+        unsafe {
+            std::env::remove_var("WAZUH_API_PASSWORD");
+        }
+    }
+
+    #[test]
+    fn test_config_debug_masks_api_password() {
+        let config = Config {
+            api_url: "https://x".to_string(),
+            api_user: "u".to_string(),
+            api_password: "super-secret".to_string(),
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+            insecure: false,
+            output_format: OutputFormat::Json,
+            raw_output: false,
+            progress: false,
+            timeout: 30,
+        };
+        let dbg = format!("{:?}", config);
+        assert!(!dbg.contains("super-secret"));
+        assert!(dbg.contains("***"));
+    }
+
+    #[test]
+    fn test_config_debug_shows_empty_marker_when_password_unset() {
+        let config = Config {
+            api_url: "https://x".to_string(),
+            api_user: "u".to_string(),
+            api_password: String::new(),
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+            insecure: false,
+            output_format: OutputFormat::Json,
+            raw_output: false,
+            progress: false,
+            timeout: 30,
+        };
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("(empty)"));
+        assert!(!dbg.contains("***"));
     }
 }
