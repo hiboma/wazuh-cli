@@ -158,12 +158,24 @@ wazuh-cli credentials set api-password
 # Or read from stdin (pipe-friendly):
 printf '%s' "$PASSWORD" | wazuh-cli credentials set api-password --stdin
 
+# Or read from a 0o600 file — useful for 1Password / sops integration:
+op read 'op://vault/wazuh/password' > /tmp/s && chmod 600 /tmp/s \
+  && wazuh-cli credentials set api-password --file /tmp/s \
+  && rm /tmp/s
+
 # See whether a password is stored (value is NOT printed):
-wazuh-cli credentials status
+wazuh-cli credentials status            # TSV on stdout, header on stderr
+wazuh-cli credentials status --json     # machine-readable
 
 # Remove the entry:
 wazuh-cli credentials delete api-password
 ```
+
+`credentials set` strips only a single trailing `\r` / `\n` / `\r\n`
+from the input — any other trailing character (including a plain
+space) is preserved byte-for-byte so a password with real trailing
+whitespace is not silently mangled. `--file` additionally refuses to
+read a file that is readable by other users (mode must be `0o6xx`).
 
 There is intentionally no `credentials get` subcommand. The value never
 has to leave the Keychain for any legitimate workflow; exposing one
@@ -174,15 +186,17 @@ AI-agent transcripts.
 
 - The first Keychain read prompts the user. Clicking "Always Allow"
   pins the entry and suppresses further prompts.
-- The ACL is tied to the binary's code signature. Rebuilding wazuh-cli
-  (e.g. via `cargo install`) re-signs the binary with a different
-  identity, which will cause the Keychain to prompt again on the next
+- The ACL is tied to the binary's code signature. Any rebuild that
+  changes the signature — `cargo install`, `cargo build --release`
+  run locally, **or** `brew upgrade wazuh-cli` replacing the tapped
+  binary — will cause the Keychain to prompt again on the next
   access. If `credentials status` reports an error, open
-  **Keychain Access.app**, find the `dev.wazuh-cli` entry, and re-grant
-  access via the **Access Control** tab (or delete and re-store the
-  entry with `credentials set api-password`).
+  **Keychain Access.app**, find the `dev.wazuh-cli` entry, and
+  re-grant access via the **Access Control** tab (or delete and
+  re-store the entry with `credentials set api-password`).
 - On non-macOS builds the Keychain backend is absent; resolution uses
-  CLI + env var only.
+  CLI + env var only, and the `credentials` subcommand is not
+  compiled in.
 
 ### Environment variables
 
