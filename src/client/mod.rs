@@ -1,25 +1,94 @@
 pub mod auth;
 pub mod tls;
 
-use std::sync::Mutex;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::config::Config;
 use crate::error::WazuhError;
 
+/// Reference-counted JWT. Held as `Arc<Zeroizing<String>>` so the
+/// cache can hand out cheap `clone()`s (Arc ref-count bumps, not
+/// String copies of the plaintext) while still guaranteeing the
+/// plaintext bytes are wiped exactly once when the last Arc is
+/// dropped. This replaces the earlier `Mutex<Option<String>>` +
+/// `.clone()` design, which created unzeroized heap copies for every
+/// request.
+///
+/// **Invariant**: Arc clones of a cached token must not outlive the
+/// `request_with_retry` call that borrowed them. The whole point of
+/// using `Zeroizing` is that wipe-on-drop runs when the last Arc
+/// goes away; stashing an `Arc<Zeroizing<String>>` into a
+/// long-lived background task, a struct field, or a `tokio::spawn`
+/// future keeps the plaintext alive past a token rotation (because
+/// `refresh_token` overwrites `*guard` but does NOT touch the Arc
+/// that the old caller is still holding). Today no call site does
+/// this; if a future caller needs long-lived access, either
+/// re-authenticate or switch to `Arc<Mutex<Zeroizing<String>>>` so
+/// refresh can rewipe in place.
+type CachedToken = Arc<Zeroizing<String>>;
+
 pub struct WazuhClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: String,
-    pub(crate) token: Mutex<Option<String>>,
+    pub(crate) token: Mutex<Option<CachedToken>>,
     pub(crate) credentials: Credentials,
     pub(crate) progress: bool,
 }
 
+/// Hand-written `Debug` that never prints the password or the JWT.
+/// Prevents accidental leakage if a caller does `{:?}` in a log line
+/// or a panic backtrace captures the client state.
+impl fmt::Debug for WazuhClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let token_state = match self.token.lock() {
+            Ok(guard) => match &*guard {
+                Some(_) => "***",
+                None => "(none)",
+            },
+            Err(_) => "(poisoned)",
+        };
+        f.debug_struct("WazuhClient")
+            .field("base_url", &self.base_url)
+            .field("token", &token_state)
+            .field("credentials", &self.credentials)
+            .field("progress", &self.progress)
+            .finish()
+    }
+}
+
 pub struct Credentials {
     pub user: String,
-    pub password: String,
+    pub password: Zeroizing<String>,
 }
+
+/// Hand-written `Debug` that masks the password. `Zeroizing`'s own
+/// `Debug` prints the wrapped value, so we cannot rely on deriving.
+impl fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Credentials")
+            .field("user", &self.user)
+            .field(
+                "password",
+                &if self.password.is_empty() {
+                    "(empty)"
+                } else {
+                    "***"
+                },
+            )
+            .finish()
+    }
+}
+
+// `Credentials.password: Zeroizing<String>` and
+// `WazuhClient.token: Mutex<Option<Zeroizing<String>>>` each wipe their
+// bytes on drop, so no explicit `Drop` impls are needed here. Using
+// `Zeroizing` at the type level means refactors cannot accidentally
+// drop the wiping behavior (an explicit `impl Drop` can be removed
+// without triggering a compile error; changing the type would).
 
 impl WazuhClient {
     /// Builds a WazuhClient from Config.
@@ -40,21 +109,25 @@ impl WazuhClient {
         })
     }
 
-    /// Returns the cached token.
-    /// If no token is available, performs authentication.
-    async fn ensure_token(&self) -> Result<String, WazuhError> {
+    /// Returns a handle to the cached token, authenticating if the
+    /// cache is empty. Returns `Arc<Zeroizing<String>>` so the caller
+    /// gets a cheap ref-counted handle instead of a fresh plaintext
+    /// copy.
+    async fn ensure_token(&self) -> Result<CachedToken, WazuhError> {
         {
             let guard = self.token.lock().unwrap();
-            if let Some(ref token) = *guard {
-                return Ok(token.clone());
+            if let Some(token) = guard.as_ref() {
+                return Ok(Arc::clone(token));
             }
         }
         self.refresh_token().await
     }
 
-    /// Authenticates and caches a new token.
-    async fn refresh_token(&self) -> Result<String, WazuhError> {
-        let token = auth::authenticate(
+    /// Authenticates and caches a new token. The fresh `String` from
+    /// `auth::authenticate` is immediately moved into `Zeroizing` so
+    /// it is wiped when the Arc chain drops.
+    async fn refresh_token(&self) -> Result<CachedToken, WazuhError> {
+        let raw = auth::authenticate(
             &self.http,
             &self.base_url,
             &self.credentials.user,
@@ -62,8 +135,9 @@ impl WazuhClient {
         )
         .await?;
 
+        let token: CachedToken = Arc::new(Zeroizing::new(raw));
         let mut guard = self.token.lock().unwrap();
-        *guard = Some(token.clone());
+        *guard = Some(Arc::clone(&token));
         Ok(token)
     }
 
@@ -77,14 +151,14 @@ impl WazuhClient {
     ) -> Result<Value, WazuhError> {
         let token = self.ensure_token().await?;
         let result = self
-            .send_request(&token, method.clone(), path, query, body)
+            .send_request(token.as_str(), method.clone(), path, query, body)
             .await;
 
         match result {
             Err(WazuhError::Api { status: 401, .. }) => {
                 // On 401, retry authentication once
                 let new_token = self.refresh_token().await?;
-                self.send_request(&new_token, method, path, query, body)
+                self.send_request(new_token.as_str(), method, path, query, body)
                     .await
             }
             other => other,
@@ -223,5 +297,33 @@ impl WazuhClient {
                 }
             })),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_debug_masks_password() {
+        let c = Credentials {
+            user: "alice".to_string(),
+            password: Zeroizing::new("super-secret".to_string()),
+        };
+        let s = format!("{:?}", c);
+        assert!(!s.contains("super-secret"));
+        assert!(s.contains("alice"));
+        assert!(s.contains("***"));
+    }
+
+    #[test]
+    fn credentials_debug_shows_empty_marker_when_password_unset() {
+        let c = Credentials {
+            user: "alice".to_string(),
+            password: Zeroizing::new(String::new()),
+        };
+        let s = format!("{:?}", c);
+        assert!(s.contains("(empty)"));
+        assert!(!s.contains("***"));
     }
 }
