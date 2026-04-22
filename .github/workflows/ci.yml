@@ -18,7 +18,17 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
 
   check:
-    runs-on: ubuntu-latest
+    # Run the full check+clippy+tests matrix on Linux AND macOS so
+    # the macOS-only Keychain/credential-store code (`keyring`,
+    # `security-framework`, `classify_keyring_err` OSStatus tests,
+    # `credentials` subcommand) actually exercises on CI. The
+    # earlier Ubuntu-only setup left those paths verified only by
+    # local developer runs.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -27,15 +37,17 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: ${{ matrix.os }}
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test -- --test-threads=1
+        run: cargo test --lib -- --test-threads=1
 
   build:
     needs: check
