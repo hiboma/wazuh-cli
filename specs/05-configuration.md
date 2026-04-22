@@ -2,14 +2,21 @@
 
 ## Overview
 
-Configuration for `wazuh-cli` is resolved in the following order of precedence.
+Configuration for `wazuh-cli` is resolved in the following order of
+precedence:
 
 ```
-CLI options > Environment variables > Credential store (macOS Keychain, api_password only) > Configuration file > Default values
+CLI options
+  > Environment variables
+  > Credential store (macOS Keychain, api_password only)
+  > Configuration file (~/.config/wazuh-cli/config.toml)
+  > Default values
 ```
 
-The credential store tier only applies to `api_password`. Other settings
-(URL, user, cert paths, etc.) do not read from the Keychain.
+The credential store tier only applies to `api_password`. All other
+settings (URL, user, cert paths, timeout, output format, etc.) skip
+the Keychain tier and consult CLI, env var, file, default in that
+order.
 
 ## Environment Variables
 
@@ -29,13 +36,18 @@ The credential store tier only applies to `api_password`. Other settings
 
 ## Configuration File
 
-Settings can be written in `~/.config/wazuh-cli/config.toml`.
+Settings can be written to a TOML file. Every section and field is
+optional; missing fields fall through to the next tier (env var or
+default).
 
 ```toml
 [api]
 url = "https://wazuh-manager:55000"
 user = "wazuh"
-# Specifying the password via environment variables is recommended
+# DO NOT put `password = "..."` here. wazuh-cli intentionally
+# IGNORES any `[api] password` value and prints a warning on
+# startup. Use `wazuh-cli credentials set api-password` to store
+# the secret in the macOS Keychain, or set `WAZUH_API_PASSWORD`.
 
 [tls]
 ca_cert = "/path/to/ca.pem"
@@ -44,21 +56,62 @@ client_key = "/path/to/client-key.pem"
 insecure = false
 
 [output]
-format = "json"  # json, table, csv
+format = "json"   # currently only "json" is implemented
+raw = false
+progress = false
 
 [request]
 timeout = 30
 ```
 
+Unknown fields are rejected at parse time (`deny_unknown_fields`),
+so a typo like `clinet_cert` produces a clear error rather than
+being silently ignored.
+
 ### Configuration File Search Order
 
-1. Path specified with `--config <path>`
-2. Path specified with the `WAZUH_CONFIG` environment variable
-3. `~/.config/wazuh-cli/config.toml`
+1. Path specified with `--config <PATH>` (a missing / unreadable
+   file at this path is a hard error)
+2. Path in the `WAZUH_CONFIG` environment variable (same strictness)
+3. `$XDG_CONFIG_HOME/wazuh-cli/config.toml`, falling back to
+   `~/.config/wazuh-cli/config.toml`
 
-### Prototype Phase
+For tiers (1) and (2) the file is **required**: a typo in the path
+surfaces as `failed to read <path>: No such file or directory`. The
+default-location file is optional; when absent, resolution simply
+falls through to the next tier.
 
-Configuration file support is not implemented during the prototype phase. Only environment variables and CLI options are functional.
+### Why the file sits below the Keychain for `api_password`
+
+`api_password` is resolved as **CLI > env var > Keychain > file >
+default**. The config file is explicitly below the Keychain because:
+
+- A plaintext password in the file defeats the whole point of the
+  Keychain backing (it would be included in Time Machine /
+  iCloud / rsync snapshots, dotfile repos, etc.).
+- If the file did contain a stale password, a Keychain-backed
+  rotation must still win — otherwise rotating via
+  `credentials set api-password` would appear to have had no
+  effect.
+- The `[api] password` field is accepted by the parser only so the
+  startup warning can detect and reject it; the value itself is
+  never consumed.
+
+### File permissions
+
+On startup, `wazuh-cli` warns to stderr if the config file has any
+of `0o077` bits set (group or world accessible). The warning is
+informational: the file is expected to contain non-secret settings,
+and breaking non-sensitive configs behind the same fence would be
+too aggressive. The warning is load-bearing if the user writes a
+secret there anyway — in which case the log line tells them to use
+`credentials set api-password` instead.
+
+### Prototype phase note (historical)
+
+Earlier drafts of this document noted that "configuration file
+support is not implemented during the prototype phase". That
+limitation is now lifted as of this commit.
 
 ## Credential store (macOS Keychain)
 

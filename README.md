@@ -218,8 +218,48 @@ AI-agent transcripts.
   re-grant access via the **Access Control** tab (or delete and
   re-store the entry with `credentials set api-password`).
 - On non-macOS builds the Keychain backend is absent; resolution uses
-  CLI + env var only, and the `credentials` subcommand is not
-  compiled in.
+  CLI + env var + config file only, and the `credentials` subcommand
+  is not compiled in.
+
+### Configuration file
+
+Non-secret settings can be written to a TOML file. Search order:
+
+1. `--config <PATH>` CLI option
+2. `WAZUH_CONFIG` environment variable
+3. `$XDG_CONFIG_HOME/wazuh-cli/config.toml`, falling back to
+   `~/.config/wazuh-cli/config.toml`
+
+Within the merge chain, the file sits **below** the Keychain:
+`CLI > env > Keychain (api_password only) > file > default`. So a
+rotated Keychain secret always wins over a stale password someone
+forgot to scrub from `config.toml`.
+
+Minimal example:
+
+```toml
+[api]
+url  = "https://wazuh-manager:55000"
+user = "wazuh"
+# DO NOT set `password = "..."` here. wazuh-cli IGNORES that field
+# and prints a warning; use `credentials set api-password` instead.
+
+[tls]
+ca_cert     = "/etc/wazuh/ca.pem"
+client_cert = "/etc/wazuh/client.pem"
+client_key  = "/etc/wazuh/client-key.pem"
+insecure    = false
+
+[request]
+timeout = 30
+```
+
+Unknown keys are rejected at parse time — `clinet_cert` will error
+out loudly rather than be silently ignored.
+
+When the file is `--config` or `WAZUH_CONFIG`, a missing / unreadable
+path is a hard error (so typos surface). The default-location file
+is optional; when absent, resolution simply falls through.
 
 ### Environment variables
 
