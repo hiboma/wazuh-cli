@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use zeroize::Zeroizing;
@@ -49,12 +49,89 @@ fn strip_trailing_newline(s: &mut String) {
     }
 }
 
+/// `libc::O_NOFOLLOW` — refuse to open if the final path component is
+/// a symlink. Inlined as a constant so we do not pull `libc` in just
+/// for one flag. Value is stable across macOS / Linux / BSDs.
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0100;
+
+/// Read the secret from a regular file at `path`, refusing:
+///   1. symlinks in the final path component (`O_NOFOLLOW` on open),
+///   2. any non-regular file (directory, FIFO, socket, device),
+///   3. files whose mode allows group or world access (`0o077` bits
+///      clear required),
+///   4. files not owned by the current effective UID.
+///
+/// Checks 3 and 4 are done on the already-opened file descriptor, not
+/// by path-based `stat`, to avoid a TOCTOU window between
+/// `fs::metadata(path)` and `fs::read_to_string(path)` in which an
+/// attacker with write access to a parent directory could swap the
+/// path for a different file.
 fn read_from_file(path: &Path) -> Result<Zeroizing<String>, WazuhError> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| {
+            // `ELOOP` on macOS / Linux is what `O_NOFOLLOW` returns for
+            // a symlinked final component. Translate to a clearer
+            // message so the user knows why the seemingly valid path
+            // was rejected.
+            if e.raw_os_error() == Some(libc_eloop()) {
+                WazuhError::Config(format!(
+                    "{} is a symlink; refusing to follow for secret \
+                     material. Pass the real path, or copy the secret \
+                     to a regular file.",
+                    path.display()
+                ))
+            } else if e.kind() == io::ErrorKind::NotFound {
+                WazuhError::Config(format!(
+                    "{} does not exist. Double-check the --file path \
+                     (shell ~ is not expanded by clap; pass an \
+                     absolute path or a path relative to the current \
+                     working directory).",
+                    path.display()
+                ))
+            } else {
+                WazuhError::Config(format!("failed to open {}: {}", path.display(), e))
+            }
+        })?;
+
+    // fstat the opened fd (not the path) so the mode/uid checks
+    // apply to the exact inode we are about to read, closing the
+    // TOCTOU window.
+    let meta = file
+        .metadata()
+        .map_err(|e| WazuhError::Config(format!("failed to stat {}: {}", path.display(), e)))?;
+
+    if !meta.is_file() {
+        return Err(WazuhError::Config(format!(
+            "{} is not a regular file; refuse to read a secret from \
+             a directory, FIFO, socket, or device.",
+            path.display()
+        )));
+    }
+
+    // Ownership check: another user's file sitting in an
+    // invoker-writable directory (e.g. /tmp) would otherwise satisfy
+    // the mode check while the plaintext is attacker-controlled.
+    // `geteuid()` is safe on Unix.
+    //
+    // SAFETY: `libc::geteuid` is a direct syscall with no preconditions.
+    let euid = unsafe { libc_geteuid() };
+    if meta.uid() != euid {
+        return Err(WazuhError::Config(format!(
+            "{} is owned by uid {}, not the current euid {}; refuse \
+             to read a secret from a file the invoker does not own.",
+            path.display(),
+            meta.uid(),
+            euid
+        )));
+    }
+
     // Refuse world/group-readable files. A secret that any other
     // account on the system can read defeats the point of storing it
     // in the Keychain.
-    let meta = fs::metadata(path)
-        .map_err(|e| WazuhError::Config(format!("failed to stat {}: {}", path.display(), e)))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(WazuhError::Config(format!(
@@ -66,27 +143,93 @@ fn read_from_file(path: &Path) -> Result<Zeroizing<String>, WazuhError> {
         )));
     }
 
-    // Read straight into a `String` and wrap in `Zeroizing` so the
-    // heap allocation is wiped on drop. `fs::read_to_string` rejects
-    // non-UTF-8 content, which is what we want — a password the
-    // user can actually type into a prompt.
-    let raw = fs::read_to_string(path)
-        .map_err(|e| WazuhError::Config(format!("failed to read {}: {}", path.display(), e)))?;
+    // Read into a fresh `String` sized up-front by the file length.
+    // Sizing the allocation before any bytes are read avoids the
+    // `String::push_str` realloc+free cycle that would leave
+    // un-zeroed old buffer fragments behind on the heap.
+    let size = meta.len() as usize;
+    let mut raw = String::with_capacity(size.saturating_add(1));
+    let mut file = file;
+    file.read_to_string(&mut raw).map_err(|e| {
+        // If the buffer grew anyway (rare: e.g. len() lied, TOCTOU
+        // on a growing file), wipe whatever we did read before
+        // propagating the error.
+        use zeroize::Zeroize;
+        raw.zeroize();
+        WazuhError::Config(format!("failed to read {}: {}", path.display(), e))
+    })?;
     let mut s: Zeroizing<String> = Zeroizing::new(raw);
     strip_trailing_newline(&mut s);
     Ok(s)
 }
 
+/// `ELOOP` value. Inlined to avoid a `libc` dependency for one
+/// constant. macOS and Linux both use 62 for ELOOP... wait, macOS
+/// uses 62 and Linux uses 40. Use the right one per target.
+#[cfg(target_os = "macos")]
+fn libc_eloop() -> i32 {
+    62
+}
+
+/// `geteuid()` via a FFI declaration — avoids pulling the `libc`
+/// crate. Stable ABI on every Unix.
+#[cfg(target_os = "macos")]
+unsafe fn libc_geteuid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
+/// Soft cap on secret size. A JWT or API password is far smaller
+/// than this; the cap exists to bound the allocation we pre-reserve
+/// for `read_from_stdin` (so `String::push_str`'s realloc path is
+/// avoided and we do not leave un-zeroed old buffer fragments on
+/// the heap) and to reject clearly-abnormal input (someone piping
+/// a log file into `credentials set`).
+const STDIN_MAX_BYTES: usize = 8 * 1024;
+
 fn read_from_stdin() -> Result<Zeroizing<String>, WazuhError> {
-    // `read_to_string` is used over `read_line` so callers can pipe
-    // multi-line secrets (rare, but the code becomes wrong if we
-    // silently truncate). Only the final `\r` / `\n` is stripped.
-    let mut buf: Zeroizing<String> = Zeroizing::new(String::new());
+    // Read the whole stdin into a pre-sized Vec<u8> inside a
+    // Zeroizing wrapper, so:
+    //   * the buffer is wiped on drop even if we return an Err,
+    //   * `read_to_end` does not trigger a realloc+free that would
+    //     leave an un-zeroed previous allocation on the heap.
+    // Read_line was not used because callers may pipe a multi-line
+    // secret (rare, but silently truncating would be worse than
+    // preserving).
+    let mut buf: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(STDIN_MAX_BYTES + 1));
     io::stdin()
-        .read_to_string(&mut buf)
+        .take((STDIN_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
         .map_err(|e| WazuhError::Config(format!("failed to read stdin: {}", e)))?;
-    strip_trailing_newline(&mut buf);
-    Ok(buf)
+    if buf.len() > STDIN_MAX_BYTES {
+        return Err(WazuhError::Config(format!(
+            "stdin exceeded {} bytes; refusing to treat this as a \
+             credential (did you pipe the wrong stream?)",
+            STDIN_MAX_BYTES
+        )));
+    }
+    // Convert Vec<u8> → String in place without copying. If the
+    // bytes are not valid UTF-8, zeroize the Vec before returning
+    // the error.
+    let s = match String::from_utf8(std::mem::take(&mut *buf)) {
+        Ok(s) => s,
+        Err(e) => {
+            // The invalid bytes are inside the FromUtf8Error; pulling
+            // them back out and zeroizing closes the only remaining
+            // window.
+            let mut bad = e.into_bytes();
+            use zeroize::Zeroize;
+            bad.zeroize();
+            return Err(WazuhError::Config(
+                "stdin input is not valid UTF-8".to_string(),
+            ));
+        }
+    };
+    let mut s: Zeroizing<String> = Zeroizing::new(s);
+    strip_trailing_newline(&mut s);
+    Ok(s)
 }
 
 fn prompt_tty(field: CredentialField) -> Result<Zeroizing<String>, WazuhError> {
@@ -103,20 +246,20 @@ fn set_value(
     from_file: Option<&Path>,
 ) -> Result<(), WazuhError> {
     // Resolve the input source. `conflicts_with` in the CLI definition
-    // guarantees at most one of `--stdin` / `--file` is set, so the
-    // priority order here is informational.
-    let value: Zeroizing<String> = if let Some(p) = from_file {
-        read_from_file(p)?
+    // guarantees at most one of `--stdin` / `--file` is set.
+    let (value, source_label): (Zeroizing<String>, &'static str) = if let Some(p) = from_file {
+        (read_from_file(p)?, "--file")
     } else if from_stdin {
-        read_from_stdin()?
+        (read_from_stdin()?, "--stdin")
     } else {
-        prompt_tty(field)?
+        (prompt_tty(field)?, "prompt")
     };
 
     if value.is_empty() {
-        return Err(WazuhError::Config(
-            "empty value; refusing to store an empty credential".to_string(),
-        ));
+        return Err(WazuhError::Config(format!(
+            "empty value from {}; refusing to store an empty credential",
+            source_label
+        )));
     }
 
     if let Err(e) = store.set(field.key(), &value) {
@@ -147,22 +290,43 @@ fn print_status(store: &dyn CredentialStore, json: bool) -> Result<(), WazuhErro
     }
 
     // Header on stderr so stdout only carries the TSV rows (caller can
-    // `awk` / `jq` without parsing headers).
+    // `awk` / `cut -f2` without parsing headers).
     eprintln!("Credential store: macOS Keychain (service=dev.wazuh-cli)");
     let mut saw_error = false;
+    let mut all_missing = true;
     for field in fields {
         match store.get(field.key()) {
-            Ok(Some(_)) => println!("{}\tstored", field.display()),
+            Ok(Some(_)) => {
+                println!("{}\tstored", field.display());
+                all_missing = false;
+            }
             Ok(None) => println!("{}\tnot-stored", field.display()),
             Err(e) => {
-                println!("{}\terror\t{}", field.display(), e);
+                // Sanitize the error text: any TAB / CR / LF in it
+                // would silently break the 3-column TSV invariant
+                // (`cut -f3` would pick up the wrong substring, or
+                // tooling would see an extra row). Replace with
+                // single spaces. Prefer `--json` if you need the
+                // original message intact.
+                let msg = e.to_string().replace(['\t', '\n', '\r'], " ");
+                println!("{}\terror\t{}", field.display(), msg);
                 saw_error = true;
+                all_missing = false;
             }
         }
     }
     if saw_error {
         eprintln!();
         eprintln!("{}", ACL_GUIDANCE);
+    } else if all_missing {
+        // First-time-user nudge. Only fires when nothing is stored
+        // and nothing errored — the two distinct "show me my
+        // setup" paths give distinct guidance.
+        eprintln!();
+        eprintln!(
+            "No credentials stored yet. To populate the Keychain, run:\n  \
+             wazuh-cli credentials set api-password"
+        );
     }
     Ok(())
 }
@@ -173,10 +337,19 @@ fn print_status_json(
 ) -> Result<(), WazuhError> {
     let mut entries = serde_json::Map::new();
     let mut saw_error = false;
+    let mut any_stored = false;
     for field in fields {
+        // Use hyphen-separated state names so the JSON and TSV
+        // vocabularies agree: `stored`, `not-stored`, `error`. The
+        // key in `entries` is also the hyphenated CLI arg value so
+        // `.entries["api-password"].state` works without a
+        // conversion table on the caller side.
         let (state, err) = match store.get(field.key()) {
-            Ok(Some(_)) => ("stored", None),
-            Ok(None) => ("not_stored", None),
+            Ok(Some(_)) => {
+                any_stored = true;
+                ("stored", None)
+            }
+            Ok(None) => ("not-stored", None),
             Err(e) => {
                 saw_error = true;
                 ("error", Some(e.to_string()))
@@ -196,8 +369,13 @@ fn print_status_json(
         );
     }
 
+    // `ok` is a top-level boolean so monitoring checks (Datadog,
+    // PagerDuty custom checks, a trivial `jq '.ok'`) do not have to
+    // enumerate the entries map to decide "is anything wrong".
+    let ok = !saw_error;
     let out = serde_json::json!({
         "service": crate::config::credential_store::KEYCHAIN_SERVICE,
+        "ok": ok,
         "entries": entries,
     });
     println!(
@@ -207,6 +385,11 @@ fn print_status_json(
 
     if saw_error {
         eprintln!("{}", ACL_GUIDANCE);
+    } else if !any_stored {
+        eprintln!(
+            "No credentials stored yet. To populate the Keychain, run:\n  \
+             wazuh-cli credentials set api-password"
+        );
     }
     Ok(())
 }
@@ -284,5 +467,85 @@ mod tests {
         let mut s = String::from("secret");
         strip_trailing_newline(&mut s);
         assert_eq!(s, "secret");
+    }
+
+    #[test]
+    fn read_from_file_rejects_group_readable_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir_in_target();
+        let path = dir.join("perm.txt");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(b"secret").unwrap();
+        drop(f);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = read_from_file(&path).unwrap_err();
+        match err {
+            WazuhError::Config(msg) => {
+                assert!(msg.contains("chmod 600"), "got: {}", msg);
+                assert!(msg.contains("644"), "got: {}", msg);
+            }
+            other => panic!("expected Config error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_from_file_rejects_symlink() {
+        use std::io::Write;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempdir_in_target();
+        let target = dir.join("real.txt");
+        let mut f = fs::File::create(&target).unwrap();
+        f.write_all(b"secret").unwrap();
+        drop(f);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let link = dir.join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        let err = read_from_file(&link).unwrap_err();
+        match err {
+            WazuhError::Config(msg) => {
+                assert!(msg.contains("symlink"), "got: {}", msg);
+            }
+            other => panic!("expected Config error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn read_from_file_accepts_mode_0600_regular_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir_in_target();
+        let path = dir.join("ok.txt");
+        let mut f = fs::File::create(&path).unwrap();
+        f.write_all(b"sekret\n").unwrap();
+        drop(f);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let got = read_from_file(&path).unwrap();
+        // The trailing \n is stripped; the body is preserved.
+        assert_eq!(got.as_str(), "sekret");
+    }
+
+    /// Create a unique directory under `target/credentials-tests/`
+    /// that the test owns and can write into with `0o600` files.
+    /// Using `env::temp_dir()` (`/tmp`) is fine on macOS local dev
+    /// but problematic under `cargo test` on CI when multiple tests
+    /// run concurrently and collide on paths; a target-relative
+    /// directory sidesteps the issue and cleans up with `cargo
+    /// clean`.
+    fn tempdir_in_target() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("wazuh-cli-creds-test-{}-{}", pid, n));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

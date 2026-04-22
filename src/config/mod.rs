@@ -13,7 +13,13 @@ use credential_store::{CredentialStore, KEY_API_PASSWORD, StoreError, default_st
 pub struct CliOpts {
     pub api_url: Option<String>,
     pub api_user: Option<String>,
-    pub api_password: Option<String>,
+    /// Wrapped in `Zeroizing` so that the plaintext moved from `argv`
+    /// via clap is wiped when `CliOpts` drops, rather than sitting on
+    /// the heap for the rest of the process. The original `argv`
+    /// slot that clap copies from is already exposed via `ps`, but
+    /// the in-process heap copy is recoverable from a core dump and
+    /// is the one under our control.
+    pub api_password: Option<Zeroizing<String>>,
     pub ca_cert: Option<String>,
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
@@ -83,16 +89,35 @@ impl Config {
     ///
     /// Priority: CLI options > environment variables > credential
     /// store > default values.
+    ///
+    /// The `wazuh-cli` binary does not call this directly — it uses
+    /// `from_cli_env_and_store` with a pre-captured env password so
+    /// the startup path can scrub `WAZUH_API_PASSWORD` from the
+    /// environment before any subcommand dispatches. This variant
+    /// exists for library callers (integration tests, embedders)
+    /// that do not need the early-scrub discipline.
+    #[allow(dead_code)]
     pub fn from_cli_and_env(cli: &CliOpts) -> Result<Config, WazuhError> {
-        Self::from_cli_env_and_store(cli, default_store().as_ref())
+        // Consume `WAZUH_API_PASSWORD` here if it is still in the
+        // environment. `main.rs` normally captures-and-scrubs earlier,
+        // but non-binary callers (tests, embedding) need the
+        // convenience path to Just Work.
+        let env_pw = std::env::var("WAZUH_API_PASSWORD")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Zeroizing::new);
+        Self::from_cli_env_and_store(cli, env_pw.as_ref(), default_store().as_ref())
     }
 
-    /// Same as `from_cli_and_env`, but with an injectable credential
-    /// store. Exists so tests can exercise the Keychain fall-through
-    /// without touching the real Keychain, and so the caller can
-    /// substitute `UnavailableStore` in hostile contexts.
+    /// Same as `from_cli_and_env`, but with an explicit env-var value
+    /// and an injectable credential store. Exists so tests can
+    /// exercise the Keychain fall-through without touching the real
+    /// Keychain, and so callers that have already scrubbed
+    /// `WAZUH_API_PASSWORD` from the process environment can still
+    /// pass the captured value through.
     pub fn from_cli_env_and_store(
         cli: &CliOpts,
+        env_password: Option<&Zeroizing<String>>,
         store: &dyn CredentialStore,
     ) -> Result<Config, WazuhError> {
         let api_url = resolve_string(
@@ -103,7 +128,7 @@ impl Config {
 
         let api_user = resolve_string(&cli.api_user, "WAZUH_API_USER", Some("wazuh"))?;
 
-        let api_password = resolve_api_password(&cli.api_password, store)?;
+        let api_password = resolve_api_password(&cli.api_password, env_password, store)?;
 
         let ca_cert = resolve_optional_string(&cli.ca_cert, "WAZUH_CA_CERT");
         let client_cert = resolve_optional_string(&cli.client_cert, "WAZUH_CLIENT_CERT");
@@ -154,20 +179,19 @@ impl Config {
 /// hard error to avoid silently falling through to a stale source
 /// after a Keychain ACL denial.
 fn resolve_api_password(
-    cli_value: &Option<String>,
+    cli_value: &Option<Zeroizing<String>>,
+    env_password: Option<&Zeroizing<String>>,
     store: &dyn CredentialStore,
 ) -> Result<Zeroizing<String>, WazuhError> {
     if let Some(v) = cli_value {
-        return Ok(Zeroizing::new(v.clone()));
+        // Clone into a fresh Zeroizing so the returned value has an
+        // independent lifetime from `CliOpts`. Both the source and
+        // the clone are wiped on their respective drops.
+        return Ok(Zeroizing::new((**v).clone()));
     }
 
-    if let Ok(v) = std::env::var("WAZUH_API_PASSWORD")
-        && !v.is_empty()
-    {
-        // Move the env-var value into a Zeroizing<String>. `std::env::var`
-        // returns a fresh heap `String`; we own it here and wipe it on
-        // drop rather than leaving it as an un-zeroized plaintext copy.
-        return Ok(Zeroizing::new(v));
+    if let Some(v) = env_password {
+        return Ok(Zeroizing::new((**v).clone()));
     }
 
     match store.get(KEY_API_PASSWORD) {
@@ -307,7 +331,7 @@ mod tests {
         let cli = CliOpts {
             api_url: Some("https://custom:9200".to_string()),
             api_user: Some("admin".to_string()),
-            api_password: Some("secret".to_string()),
+            api_password: Some("secret".to_string().into()),
             ca_cert: Some("/path/to/ca.pem".to_string()),
             client_cert: Some("/path/to/cert.pem".to_string()),
             client_key: Some("/path/to/key.pem".to_string()),
@@ -521,64 +545,46 @@ mod tests {
     #[test]
     fn test_api_password_from_credential_store_when_env_unset() {
         // No CLI, no env -> should fall through to the credential store.
-        unsafe {
-            std::env::remove_var("WAZUH_API_PASSWORD");
-        }
-
         let store = MemoryStore::new();
         store
             .set(credential_store::KEY_API_PASSWORD, "from-keychain")
             .unwrap();
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+        let config = Config::from_cli_env_and_store(&cli, None, &store).unwrap();
 
         assert_eq!(config.api_password.as_str(), "from-keychain");
     }
 
     #[test]
     fn test_env_wins_over_credential_store() {
-        unsafe {
-            std::env::set_var("WAZUH_API_PASSWORD", "from-env");
-        }
-
         let store = MemoryStore::new();
         store
             .set(credential_store::KEY_API_PASSWORD, "from-keychain")
             .unwrap();
 
+        let env_pw = Zeroizing::new("from-env".to_string());
         let cli = default_cli_opts();
-        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+        let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
 
         assert_eq!(config.api_password.as_str(), "from-env");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_PASSWORD");
-        }
     }
 
     #[test]
     fn test_cli_wins_over_env_and_credential_store() {
-        unsafe {
-            std::env::set_var("WAZUH_API_PASSWORD", "from-env");
-        }
-
         let store = MemoryStore::new();
         store
             .set(credential_store::KEY_API_PASSWORD, "from-keychain")
             .unwrap();
 
+        let env_pw = Zeroizing::new("from-env".to_string());
         let cli = CliOpts {
-            api_password: Some("from-cli".to_string()),
+            api_password: Some("from-cli".to_string().into()),
             ..default_cli_opts()
         };
-        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+        let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
 
         assert_eq!(config.api_password.as_str(), "from-cli");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_PASSWORD");
-        }
     }
 
     #[test]
@@ -588,13 +594,9 @@ mod tests {
         // CredentialStore error (NOT silently produce an empty
         // password), so users notice the Keychain ACL denial rather
         // than running against an empty secret.
-        unsafe {
-            std::env::remove_var("WAZUH_API_PASSWORD");
-        }
-
         let store = FailingStore::backend();
         let cli = default_cli_opts();
-        let err = Config::from_cli_env_and_store(&cli, &store).unwrap_err();
+        let err = Config::from_cli_env_and_store(&cli, None, &store).unwrap_err();
         match err {
             WazuhError::CredentialStore(msg) => {
                 assert!(msg.contains("simulated backend failure"));
@@ -606,21 +608,16 @@ mod tests {
 
     #[test]
     fn test_credential_store_backend_does_not_swallow_when_env_set() {
-        // If WAZUH_API_PASSWORD is set, resolve() should use it and
-        // never even consult the store — so a Backend error must not
-        // surface in that case. This pins the "env > store" priority.
-        unsafe {
-            std::env::set_var("WAZUH_API_PASSWORD", "from-env-bypass");
-        }
-
+        // If the captured env password is set, resolve() should use
+        // it and never even consult the store — so a Backend error
+        // must not surface in that case. This pins the "env > store"
+        // priority even when the real `WAZUH_API_PASSWORD` env var
+        // has already been scrubbed.
+        let env_pw = Zeroizing::new("from-env-bypass".to_string());
         let store = FailingStore::backend();
         let cli = default_cli_opts();
-        let config = Config::from_cli_env_and_store(&cli, &store).unwrap();
+        let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
         assert_eq!(config.api_password.as_str(), "from-env-bypass");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_PASSWORD");
-        }
     }
 
     #[test]

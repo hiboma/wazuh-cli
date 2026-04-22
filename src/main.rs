@@ -42,6 +42,21 @@ impl Write for BrokenPipeTolerantStdout<'_> {
 fn main() {
     let cli = Cli::parse();
 
+    // Capture `WAZUH_API_PASSWORD` and immediately scrub it from the
+    // process environment, *before* any subcommand dispatch. This
+    // closes the window in which `ps -E` / `/proc/<pid>/environ`
+    // could read the plaintext, and it covers the `credentials`
+    // subcommand path too (which does not consume the env var but
+    // previously left it in place for the duration of the run).
+    //
+    // SAFETY: single-threaded context; no other thread observes env
+    // mutations at this point in startup.
+    let env_api_password: Option<zeroize::Zeroizing<String>> = {
+        let v = std::env::var("WAZUH_API_PASSWORD").ok();
+        unsafe { std::env::remove_var("WAZUH_API_PASSWORD") };
+        v.filter(|s| !s.is_empty()).map(zeroize::Zeroizing::new)
+    };
+
     // Subcommands that do not talk to the Wazuh API do not need a tokio
     // runtime and must run before any credential resolution that would
     // otherwise require API config. Handle them here.
@@ -88,10 +103,14 @@ fn main() {
         _ => {}
     }
 
+    // Move the clap-parsed password straight into `Zeroizing` so the
+    // only heap copy under our control is wiped on drop. The argv
+    // copy itself is already exposed via `ps` and we cannot touch
+    // that.
     let cli_opts = CliOpts {
         api_url: cli.global.api_url,
         api_user: cli.global.api_user,
-        api_password: cli.global.api_password,
+        api_password: cli.global.api_password.map(zeroize::Zeroizing::new),
         ca_cert: cli.global.ca_cert,
         client_cert: cli.global.client_cert,
         client_key: cli.global.client_key,
@@ -102,26 +121,21 @@ fn main() {
         timeout: None,
     };
 
-    let config = match Config::from_cli_and_env(&cli_opts) {
+    // Pass the captured env password into resolution. We already
+    // scrubbed the env var at startup so `from_cli_and_env` would
+    // not find it now; the `from_cli_env_and_store` variant threads
+    // the captured value through explicitly.
+    let config = match Config::from_cli_env_and_store(
+        &cli_opts,
+        env_api_password.as_ref(),
+        config::credential_store::default_store().as_ref(),
+    ) {
         Ok(c) => c,
         Err(e) => {
             output::print_error(&e);
             process::exit(output::exit_code(&e));
         }
     };
-
-    // Scrub WAZUH_API_PASSWORD from this process's environment
-    // immediately after resolution. Once it is held in `Config` we no
-    // longer need the env var, and leaving it behind exposes the
-    // plaintext via `ps -E` / `/proc/<pid>/environ` for the lifetime of
-    // the process. Run while we are still single-threaded (before the
-    // tokio runtime is created).
-    //
-    // SAFETY: single-threaded context; no other thread observes env
-    // mutations at this point in startup.
-    unsafe {
-        std::env::remove_var("WAZUH_API_PASSWORD");
-    }
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
