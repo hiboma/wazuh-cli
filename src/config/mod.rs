@@ -1,10 +1,14 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use zeroize::Zeroizing;
 
 use crate::error::WazuhError;
 
 pub mod credential_store;
+pub mod file;
+
+use file::ConfigFile;
 
 use credential_store::{CredentialStore, KEY_API_PASSWORD, StoreError, default_store};
 
@@ -28,6 +32,10 @@ pub struct CliOpts {
     pub raw: bool,
     pub progress: bool,
     pub timeout: Option<u64>,
+    /// Path to a TOML config file (`--config <PATH>`). Overrides
+    /// both `WAZUH_CONFIG` and the default
+    /// `~/.config/wazuh-cli/config.toml` location.
+    pub config: Option<PathBuf>,
 }
 
 pub struct Config {
@@ -85,14 +93,18 @@ pub enum OutputFormat {
 impl Config {
     /// Builds Config from CLI options and environment variables,
     /// consulting the platform default credential store (macOS
-    /// Keychain) as the last-resort source for the API password.
+    /// Keychain) and, optionally, a TOML config file.
     ///
-    /// Priority: CLI options > environment variables > credential
-    /// store > default values.
+    /// Priority (first non-empty wins, per field):
+    ///     CLI options
+    ///   > environment variables
+    ///   > credential store  (api_password only)
+    ///   > config file       (~/.config/wazuh-cli/config.toml)
+    ///   > built-in defaults
     ///
     /// The `wazuh-cli` binary does not call this directly — it uses
-    /// `from_cli_env_and_store` with a pre-captured env password so
-    /// the startup path can scrub `WAZUH_API_PASSWORD` from the
+    /// `from_cli_env_store_and_file` with a pre-captured env password
+    /// so the startup path can scrub `WAZUH_API_PASSWORD` from the
     /// environment before any subcommand dispatches. This variant
     /// exists for library callers (integration tests, embedders)
     /// that do not need the early-scrub discipline.
@@ -106,55 +118,94 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(Zeroizing::new);
-        Self::from_cli_env_and_store(cli, env_pw.as_ref(), default_store().as_ref())
+        let loaded = file::load(
+            cli.config.as_deref(),
+            std::env::var("WAZUH_CONFIG").ok().as_deref(),
+        )?;
+        let file_cfg = loaded.as_ref().map(|(_, f)| f);
+        Self::from_cli_env_store_and_file(cli, env_pw.as_ref(), default_store().as_ref(), file_cfg)
     }
 
-    /// Same as `from_cli_and_env`, but with an explicit env-var value
-    /// and an injectable credential store. Exists so tests can
-    /// exercise the Keychain fall-through without touching the real
-    /// Keychain, and so callers that have already scrubbed
-    /// `WAZUH_API_PASSWORD` from the process environment can still
-    /// pass the captured value through.
+    /// Preserved name for the env+store-only signature. Kept as a
+    /// thin wrapper over `from_cli_env_store_and_file` so existing
+    /// call sites (and tests) do not have to pass `None` for the
+    /// file argument explicitly.
+    #[allow(dead_code)]
     pub fn from_cli_env_and_store(
         cli: &CliOpts,
         env_password: Option<&Zeroizing<String>>,
         store: &dyn CredentialStore,
     ) -> Result<Config, WazuhError> {
+        Self::from_cli_env_store_and_file(cli, env_password, store, None)
+    }
+
+    /// Full resolution form. Every input except `cli` is injectable so
+    /// tests can drive any tier independently.
+    pub fn from_cli_env_store_and_file(
+        cli: &CliOpts,
+        env_password: Option<&Zeroizing<String>>,
+        store: &dyn CredentialStore,
+        file_cfg: Option<&ConfigFile>,
+    ) -> Result<Config, WazuhError> {
         let api_url = resolve_string(
-            &cli.api_url,
+            cli.api_url.as_deref(),
             "WAZUH_API_URL",
+            file_cfg.and_then(|f| f.api.url.as_deref()),
             Some("https://localhost:55000"),
         )?;
 
-        let api_user = resolve_string(&cli.api_user, "WAZUH_API_USER", Some("wazuh"))?;
+        let api_user = resolve_string(
+            cli.api_user.as_deref(),
+            "WAZUH_API_USER",
+            file_cfg.and_then(|f| f.api.user.as_deref()),
+            Some("wazuh"),
+        )?;
 
         let api_password = resolve_api_password(&cli.api_password, env_password, store)?;
 
-        let ca_cert = resolve_optional_string(&cli.ca_cert, "WAZUH_CA_CERT");
-        let client_cert = resolve_optional_string(&cli.client_cert, "WAZUH_CLIENT_CERT");
-        let client_key = resolve_optional_string(&cli.client_key, "WAZUH_CLIENT_KEY");
+        let ca_cert = resolve_optional_string(
+            cli.ca_cert.as_deref(),
+            "WAZUH_CA_CERT",
+            file_cfg.and_then(|f| f.tls.ca_cert.as_deref()),
+        );
+        let client_cert = resolve_optional_string(
+            cli.client_cert.as_deref(),
+            "WAZUH_CLIENT_CERT",
+            file_cfg.and_then(|f| f.tls.client_cert.as_deref()),
+        );
+        let client_key = resolve_optional_string(
+            cli.client_key.as_deref(),
+            "WAZUH_CLIENT_KEY",
+            file_cfg.and_then(|f| f.tls.client_key.as_deref()),
+        );
 
-        let insecure = if cli.insecure {
-            true
-        } else {
-            resolve_bool("WAZUH_INSECURE", false)
-        };
+        let insecure = resolve_bool_tier(
+            cli.insecure,
+            "WAZUH_INSECURE",
+            file_cfg.and_then(|f| f.tls.insecure),
+            false,
+        );
 
-        let output_format = resolve_output_format(&cli.output)?;
+        let output_format = resolve_output_format(
+            cli.output.as_deref(),
+            file_cfg.and_then(|f| f.output.format.as_deref()),
+        )?;
 
-        let raw_output = if cli.raw {
-            true
-        } else {
-            resolve_bool("WAZUH_RAW", false)
-        };
+        let raw_output = resolve_bool_tier(
+            cli.raw,
+            "WAZUH_RAW",
+            file_cfg.and_then(|f| f.output.raw),
+            false,
+        );
 
-        let progress = if cli.progress {
-            true
-        } else {
-            resolve_bool("WAZUH_PROGRESS", false)
-        };
+        let progress = resolve_bool_tier(
+            cli.progress,
+            "WAZUH_PROGRESS",
+            file_cfg.and_then(|f| f.output.progress),
+            false,
+        );
 
-        let timeout = resolve_timeout(cli.timeout)?;
+        let timeout = resolve_timeout(cli.timeout, file_cfg.and_then(|f| f.request.timeout))?;
 
         Ok(Config {
             api_url,
@@ -206,61 +257,103 @@ fn resolve_api_password(
     }
 }
 
-/// Resolves a string in order: CLI option -> environment variable -> default value.
-/// Returns an empty string if default is None and no value is found.
+/// Resolve a string-valued setting in priority order:
+/// CLI > env var > config file > default.
 fn resolve_string(
-    cli_value: &Option<String>,
+    cli_value: Option<&str>,
     env_var: &str,
+    file_value: Option<&str>,
     default: Option<&str>,
 ) -> Result<String, WazuhError> {
     if let Some(v) = cli_value {
-        return Ok(v.clone());
+        return Ok(v.to_string());
     }
-
     if let Ok(v) = std::env::var(env_var)
         && !v.is_empty()
     {
         return Ok(v);
     }
-
-    match default {
-        Some(d) => Ok(d.to_string()),
-        None => Ok(String::new()),
+    if let Some(v) = file_value
+        && !v.is_empty()
+    {
+        return Ok(v.to_string());
     }
+    Ok(default.map(|s| s.to_string()).unwrap_or_default())
 }
 
-/// Resolves an optional string in order: CLI option -> environment variable.
-/// Returns None if neither is set.
-fn resolve_optional_string(cli_value: &Option<String>, env_var: &str) -> Option<String> {
+/// Resolve an optional string setting in priority order:
+/// CLI > env var > config file. Returns None if none of the three
+/// tiers supplies a non-empty value.
+fn resolve_optional_string(
+    cli_value: Option<&str>,
+    env_var: &str,
+    file_value: Option<&str>,
+) -> Option<String> {
     if let Some(v) = cli_value {
-        return Some(v.clone());
+        return Some(v.to_string());
     }
-
     if let Ok(v) = std::env::var(env_var)
         && !v.is_empty()
     {
         return Some(v);
     }
-
+    if let Some(v) = file_value
+        && !v.is_empty()
+    {
+        return Some(v.to_string());
+    }
     None
 }
 
-/// Resolves a boolean from an environment variable.
-/// Treats "true", "1", "yes" as true (case-insensitive).
-fn resolve_bool(env_var: &str, default: bool) -> bool {
-    match std::env::var(env_var) {
-        Ok(v) => matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"),
-        Err(_) => default,
+/// Resolve a boolean in priority order: CLI flag (if set, true) >
+/// env var (truthy values: "true"/"1"/"yes", case-insensitive) >
+/// config file > default.
+///
+/// The CLI flag has no "unset" state — clap flags are bool — so a
+/// `false` CLI value never overrides the lower tiers. That matches
+/// the previous behavior for `--insecure` / `--raw` / `--progress`.
+fn resolve_bool_tier(
+    cli_flag: bool,
+    env_var: &str,
+    file_value: Option<bool>,
+    default: bool,
+) -> bool {
+    if cli_flag {
+        return true;
     }
+    if let Ok(v) = std::env::var(env_var) {
+        if matches!(v.to_lowercase().as_str(), "true" | "1" | "yes") {
+            return true;
+        }
+        if matches!(v.to_lowercase().as_str(), "false" | "0" | "no") {
+            return false;
+        }
+        // An env var with a value that is neither truthy nor falsy
+        // is ignored rather than forcing a parse error — matches
+        // pre-existing resolve_bool behavior.
+    }
+    if let Some(v) = file_value {
+        return v;
+    }
+    default
 }
 
 /// Resolves the output format.
-/// Priority: CLI option -> environment variable -> default value (json).
-fn resolve_output_format(cli_value: &Option<String>) -> Result<OutputFormat, WazuhError> {
+/// Priority: CLI > env var > config file > default (`json`).
+fn resolve_output_format(
+    cli_value: Option<&str>,
+    file_value: Option<&str>,
+) -> Result<OutputFormat, WazuhError> {
     let raw = if let Some(v) = cli_value {
-        v.clone()
-    } else if let Ok(v) = std::env::var("WAZUH_OUTPUT") {
+        v.to_string()
+    } else if let Ok(v) = std::env::var("WAZUH_OUTPUT")
+        && !v.is_empty()
+    {
         v
+    } else if let Some(v) = file_value
+        && !v.is_empty()
+    {
+        v.to_string()
     } else {
         return Ok(OutputFormat::Json);
     };
@@ -275,18 +368,19 @@ fn resolve_output_format(cli_value: &Option<String>) -> Result<OutputFormat, Waz
 }
 
 /// Resolves the timeout value.
-/// Priority: CLI option -> environment variable -> default value (30 seconds).
-fn resolve_timeout(cli_value: Option<u64>) -> Result<u64, WazuhError> {
+/// Priority: CLI > env var > config file > default (30 seconds).
+fn resolve_timeout(cli_value: Option<u64>, file_value: Option<u64>) -> Result<u64, WazuhError> {
     if let Some(v) = cli_value {
         return Ok(v);
     }
-
     if let Ok(v) = std::env::var("WAZUH_TIMEOUT") {
         return v
             .parse::<u64>()
             .map_err(|_| WazuhError::Config(format!("invalid WAZUH_TIMEOUT value: {}", v)));
     }
-
+    if let Some(v) = file_value {
+        return Ok(v);
+    }
     Ok(30)
 }
 
@@ -308,6 +402,7 @@ mod tests {
             raw: false,
             progress: false,
             timeout: None,
+            config: None,
         }
     }
 
@@ -340,6 +435,7 @@ mod tests {
             raw: true,
             progress: false,
             timeout: Some(60),
+            config: None,
         };
         let config = Config::from_cli_and_env(&cli).unwrap();
 
@@ -604,6 +700,120 @@ mod tests {
             }
             other => panic!("expected CredentialStore error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_file_supplies_api_url_when_cli_and_env_unset() {
+        // The config-file tier only kicks in when CLI and env do
+        // not supply a value. Pin that contract so a rewrite cannot
+        // silently promote the file above env.
+        let file = file::ConfigFile {
+            api: file::ApiSection {
+                url: Some("https://from-file:55000".to_string()),
+                user: Some("file-user".to_string()),
+                password: None,
+            },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert_eq!(config.api_url, "https://from-file:55000");
+        assert_eq!(config.api_user, "file-user");
+    }
+
+    #[test]
+    fn test_env_wins_over_file_for_api_url() {
+        // WAZUH_API_URL > file. This env access runs inside a
+        // single-threaded test runner (--test-threads=1) which the
+        // crate enforces precisely so env mutations do not collide.
+        unsafe {
+            std::env::set_var("WAZUH_API_URL", "https://from-env:55000");
+        }
+        let file = file::ConfigFile {
+            api: file::ApiSection {
+                url: Some("https://from-file:55000".to_string()),
+                user: None,
+                password: None,
+            },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert_eq!(config.api_url, "https://from-env:55000");
+        unsafe {
+            std::env::remove_var("WAZUH_API_URL");
+        }
+    }
+
+    #[test]
+    fn test_cli_wins_over_file_for_api_url() {
+        let file = file::ConfigFile {
+            api: file::ApiSection {
+                url: Some("https://from-file:55000".to_string()),
+                user: None,
+                password: None,
+            },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        let cli = CliOpts {
+            api_url: Some("https://from-cli:55000".to_string()),
+            ..default_cli_opts()
+        };
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert_eq!(config.api_url, "https://from-cli:55000");
+    }
+
+    #[test]
+    fn test_keychain_wins_over_file_password_because_file_password_is_ignored() {
+        // `[api] password` in the file is deliberately IGNORED by
+        // the merge (file.rs's `load()` warns about it, and the
+        // merge layer simply never reads `file.api.password`). So
+        // the Keychain's value wins.
+        let file = file::ConfigFile {
+            api: file::ApiSection {
+                url: None,
+                user: None,
+                password: Some("plaintext-in-file".to_string()),
+            },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        store
+            .set(credential_store::KEY_API_PASSWORD, "from-keychain")
+            .unwrap();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert_eq!(config.api_password.as_str(), "from-keychain");
+    }
+
+    #[test]
+    fn test_file_timeout_used_when_cli_and_env_unset() {
+        let file = file::ConfigFile {
+            request: file::RequestSection { timeout: Some(77) },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert_eq!(config.timeout, 77);
+    }
+
+    #[test]
+    fn test_file_tls_insecure_flag_merges() {
+        let file = file::ConfigFile {
+            tls: file::TlsSection {
+                insecure: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let store = MemoryStore::new();
+        let cli = default_cli_opts();
+        let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
+        assert!(config.insecure);
     }
 
     #[test]

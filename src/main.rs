@@ -119,16 +119,35 @@ fn main() {
         raw: cli.global.raw,
         progress: cli.global.progress,
         timeout: None,
+        config: cli.global.config,
     };
 
+    // Load the TOML config file before resolution so its values
+    // participate in the merge. `file::load` returns Ok(None) when
+    // neither --config nor WAZUH_CONFIG was set and the default
+    // path does not exist, and Err(..) for a user-supplied path
+    // that cannot be read / parsed (so typos surface loudly).
+    let loaded_file = match config::file::load(
+        cli_opts.config.as_deref(),
+        std::env::var("WAZUH_CONFIG").ok().as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            output::print_error(&e);
+            process::exit(output::exit_code(&e));
+        }
+    };
+    let file_cfg = loaded_file.as_ref().map(|(_, f)| f);
+
     // Pass the captured env password into resolution. We already
-    // scrubbed the env var at startup so `from_cli_and_env` would
-    // not find it now; the `from_cli_env_and_store` variant threads
-    // the captured value through explicitly.
-    let config = match Config::from_cli_env_and_store(
+    // scrubbed the env var at startup so a fresh `std::env::var`
+    // lookup would not find it now; thread the captured value
+    // through explicitly.
+    let config = match Config::from_cli_env_store_and_file(
         &cli_opts,
         env_api_password.as_ref(),
         config::credential_store::default_store().as_ref(),
+        file_cfg,
     ) {
         Ok(c) => c,
         Err(e) => {
