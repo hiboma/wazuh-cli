@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum, ValueHint};
 
 /// Manage credentials stored in the macOS Keychain.
 ///
@@ -25,27 +25,36 @@ pub struct CredentialsCommand {
 pub enum CredentialsAction {
     /// Store a credential in the Keychain.
     ///
-    /// Reads the value from (in priority order): `--file <PATH>`,
-    /// `--stdin`, or an interactive hidden-input prompt.
+    /// Reads the value from `--file <PATH>`, `--stdin`, or an
+    /// interactive hidden-input prompt (in that order of priority).
+    /// Only the final line terminator (`\r`, `\n`, or `\r\n`) is
+    /// stripped from the input — other trailing whitespace, and any
+    /// interior newlines, are preserved byte-for-byte. The Keychain
+    /// entry lands under service `dev.wazuh-cli`, account
+    /// `api_password` (underscore on the Keychain side,
+    /// `api-password` as the CLI arg value).
     Set {
         /// Which credential to store.
         field: CredentialField,
 
-        /// Read the value from stdin instead of prompting. Trailing
-        /// `\r` / `\n` are stripped; other trailing characters
-        /// (including plain spaces) are preserved byte-for-byte so a
-        /// password with a real trailing space is not silently
-        /// mangled.
+        /// Read the value from stdin instead of prompting. Only the
+        /// final line terminator is stripped.
         #[arg(long, conflicts_with = "file")]
         stdin: bool,
 
-        /// Read the value from a 0o600 file at the given path. Useful
-        /// for 1Password / sops integration:
-        ///   `op read 'op://vault/item/password' > /tmp/s; \
-        ///    wazuh-cli credentials set api-password --file /tmp/s`.
-        /// Trailing `\r` / `\n` are stripped; other trailing bytes
-        /// are preserved.
-        #[arg(long, value_name = "PATH", conflicts_with = "stdin")]
+        /// Read the value from a regular file at the given path.
+        /// The file must:
+        ///   (a) not be a symlink (opened with `O_NOFOLLOW`),
+        ///   (b) be owned by the current user,
+        ///   (c) have mode clear of group/world bits (`0o077`).
+        /// Useful for 1Password / sops integration:
+        ///
+        ///   op read 'op://vault/item/password' > /tmp/s
+        ///   chmod 600 /tmp/s
+        ///   wazuh-cli credentials set api-password --file /tmp/s
+        ///
+        /// Only the final line terminator is stripped.
+        #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath, conflicts_with = "stdin")]
         file: Option<PathBuf>,
     },
     /// Delete a credential from the Keychain.
