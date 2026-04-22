@@ -68,15 +68,37 @@ is exposed as a subcommand:
 ```
 wazuh-cli credentials set api-password
 wazuh-cli credentials set api-password --stdin
-wazuh-cli credentials set api-password --file <PATH>   # mode must be 0o6xx
+wazuh-cli credentials set api-password --file <PATH>   # see requirements below
 wazuh-cli credentials delete api-password
 wazuh-cli credentials status                           # human-readable TSV
 wazuh-cli credentials status --json                    # machine-readable
 ```
 
+`--file <PATH>` must satisfy **all** of:
+
+- not a symlink (`O_NOFOLLOW`),
+- a regular file,
+- owned by the current effective UID,
+- mode with `0o077` cleared (no group/world access).
+
 `set` strips a single trailing `\r` / `\n` / `\r\n` from the input.
 Plain trailing spaces and other whitespace are preserved byte-for-byte
 so a real trailing space in a password is not silently mangled.
+Interior newlines are preserved too (multi-line secrets are allowed
+but unusual).
+
+### Output format
+
+`credentials status` emits two columns on stdout
+(`{field}\t{state}`) with a header on stderr so `cut`/`awk` can
+parse without stripping headers. Error rows get a third column with
+the message, with TAB/CR/LF replaced by single spaces — use
+`--json` if you need the original error text.
+
+`credentials status --json` emits
+`{"ok": bool, "service": "dev.wazuh-cli", "entries": {<field>: {"state": "stored"|"not-stored"|"error", "error": "..."}}}`.
+`ok` is `true` iff no entry surfaced an error. The `state` vocabulary
+uses the same hyphens as the TSV output.
 
 The entry is stored under service `dev.wazuh-cli`, account
 `api_password`. There is intentionally no `credentials get`: the value

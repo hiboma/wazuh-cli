@@ -17,6 +17,18 @@ use crate::error::WazuhError;
 /// dropped. This replaces the earlier `Mutex<Option<String>>` +
 /// `.clone()` design, which created unzeroized heap copies for every
 /// request.
+///
+/// **Invariant**: Arc clones of a cached token must not outlive the
+/// `request_with_retry` call that borrowed them. The whole point of
+/// using `Zeroizing` is that wipe-on-drop runs when the last Arc
+/// goes away; stashing an `Arc<Zeroizing<String>>` into a
+/// long-lived background task, a struct field, or a `tokio::spawn`
+/// future keeps the plaintext alive past a token rotation (because
+/// `refresh_token` overwrites `*guard` but does NOT touch the Arc
+/// that the old caller is still holding). Today no call site does
+/// this; if a future caller needs long-lived access, either
+/// re-authenticate or switch to `Arc<Mutex<Zeroizing<String>>>` so
+/// refresh can rewipe in place.
 type CachedToken = Arc<Zeroizing<String>>;
 
 pub struct WazuhClient {

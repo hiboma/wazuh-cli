@@ -174,8 +174,31 @@ wazuh-cli credentials delete api-password
 `credentials set` strips only a single trailing `\r` / `\n` / `\r\n`
 from the input — any other trailing character (including a plain
 space) is preserved byte-for-byte so a password with real trailing
-whitespace is not silently mangled. `--file` additionally refuses to
-read a file that is readable by other users (mode must be `0o6xx`).
+whitespace is not silently mangled.
+
+`--file` enforces:
+
+- the path is not a symlink (opened with `O_NOFOLLOW`),
+- the file is a regular file (not a FIFO, socket, directory, or
+  device),
+- the file is owned by the current user,
+- the mode has `0o077` cleared (no group/world access).
+
+Any of these failing produces a specific error — e.g. mode `0644`
+prints `Run \`chmod 600 /path\` and retry`, a missing path prints a
+hint that shell `~` is not expanded by clap.
+
+The Keychain entry lands under service `dev.wazuh-cli`, account
+`api_password` (underscore on the Keychain side, `api-password` as
+the CLI arg value — `credentials status` displays the hyphenated
+form to match the CLI). If you open Keychain Access.app to inspect
+or delete the entry manually, search for `api_password`.
+
+Note: other hiboma CLIs use `credentials status --format json`
+instead of `--json`. wazuh-cli uses a bare `--json` flag for
+consistency with `wazuh-cli`'s existing `--raw` style globals. Both
+forms produce the same JSON shape (`{"ok": bool, "service": str,
+"entries": {...}}`).
 
 There is intentionally no `credentials get` subcommand. The value never
 has to leave the Keychain for any legitimate workflow; exposing one
