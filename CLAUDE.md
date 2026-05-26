@@ -45,6 +45,15 @@ Follow these rules when creating or modifying workflow files in `.github/workflo
   - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
   ```
 
+### Credential persistence
+
+- Always set `persist-credentials: false` on every `actions/checkout` step unless the job performs authenticated git operations (push, pull, fetch from private repos, submodule fetch). This prevents `GITHUB_TOKEN` from being written to `.git/config` where any later step or compromised action could exfiltrate it.
+  ```yaml
+  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    with:
+      persist-credentials: false
+  ```
+
 ### Expression injection prevention
 
 - Do not use `${{ }}` expressions directly in `run:` steps. Instead, pass values through `env:` and reference them as shell variables.
