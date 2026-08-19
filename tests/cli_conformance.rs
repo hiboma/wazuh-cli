@@ -138,6 +138,26 @@ fn agent_list_sort_accepts_descending_prefix() {
 }
 
 #[test]
+fn agent_list_sort_rejects_a_following_option_as_its_value() {
+    // allow_hyphen_values stops clap from rejecting a following option, so an
+    // omitted value mid-command would otherwise consume the next flag and
+    // silently drop it. A value_parser restores the usage error.
+    for swallowed in ["--insecure", "--raw", "--quiet", "--limit"] {
+        let output = wazuh_cli()
+            .args(["agent", "list", "--sort", swallowed])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "agent list --sort {} should be a usage error, not silently swallow the flag: {}",
+            swallowed,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn agent_list_sort_still_requires_a_value() {
     let status = wazuh_cli()
         .args(["agent", "list", "--sort"])

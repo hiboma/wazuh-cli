@@ -386,4 +386,6 @@ wazuh-cli agent list --search compute- --select id,name,ip --sort name
 ```
 
 Because a descending `--sort` value begins with `-`, both `--sort -name` and
-`--sort=-name` are accepted.
+`--sort=-name` are accepted. A value beginning with `--` is rejected as a usage
+error, so an omitted value such as `agent list --sort --insecure` does not
+consume the following option as the sort field.
