@@ -26,6 +26,19 @@ multiple-versions = "warn"
 wildcards = "allow"
 highlight = "all"
 
+# `keyring`'s apple-native backend currently resolves both
+# `security-framework` 2.x (for core-foundation 0.9 compatibility) and
+# 3.x. We pin our direct dep to `3` so that the downcast in
+# `classify_keyring_err` matches the same `Error` type keyring emits.
+# Explicitly skip the 2.x copy so `cargo deny check` does not flag the
+# expected duplicate, and so a future keyring release that drops the
+# 2.x dep causes this skip line to become inert (or fail if the
+# pattern changes), giving us a signal to revisit.
+skip = [
+    { name = "security-framework", version = "=2.11.1" },
+    { name = "core-foundation", version = "=0.9.4" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

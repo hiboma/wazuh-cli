@@ -44,6 +44,33 @@ In addition to environment variables, CLI options can also be used. CLI options 
 --insecure
 ```
 
+### Credential storage (macOS Keychain)
+
+`WAZUH_API_PASSWORD` can be stored in the macOS login Keychain under
+service `dev.wazuh-cli`, account `api_password`. The `credentials`
+subcommand manages these entries:
+
+```
+wazuh-cli credentials set api-password      # prompts (hidden input)
+wazuh-cli credentials set api-password --stdin
+wazuh-cli credentials delete api-password
+wazuh-cli credentials status                # shows presence, never the value
+```
+
+Resolution order for the password is:
+
+1. `--api-password` CLI option
+2. `WAZUH_API_PASSWORD` environment variable
+3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+4. empty (authentication will fail)
+
+When the Keychain is present but an access attempt fails (a denied
+prompt, an ACL mismatch after re-signing the binary), wazuh-cli does
+**not** fall through to the empty default. It surfaces the Backend
+error so the user investigates rather than silently running against
+bad credentials. A missing default keychain (non-macOS, or a clean CI
+sandbox) is classified as `Unavailable` and does fall through.
+
 ## 2. JWT Authentication
 
 ### Authentication Flow
@@ -66,6 +93,20 @@ In addition to environment variables, CLI options can also be used. CLI options 
 
 ### Security Considerations
 
-- Passing the password via environment variables is recommended.
-- When passing it via CLI options, output a warning as it may be visible in the process list.
-- Do not save tokens to disk.
+- Passing the password via the macOS Keychain is preferred; environment
+  variables are the next best option.
+- When passing the password via `--api-password`, the value is visible in
+  the process list (`ps`) until the process exits. Prefer the Keychain or
+  the env var.
+- After resolution, wazuh-cli removes `WAZUH_API_PASSWORD` from its own
+  environment so that a subsequent `ps -E` / read of
+  `/proc/<pid>/environ` does not see the plaintext for the lifetime of
+  the process.
+- The resolved password is zeroized on process exit (via `Drop` on the
+  client credential struct), and input to `credentials set` is kept in
+  `zeroize::Zeroizing<String>` from stdin/tty through the Keychain
+  store call.
+- `Config`'s `Debug` impl masks the password as `***` (or `(empty)` when
+  unset) so stray `{:?}` in logs cannot leak it.
+- Do not save JWT tokens to disk. The in-memory token is also zeroized
+  on client drop.

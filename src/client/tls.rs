@@ -189,7 +189,7 @@ mod tests {
         Config {
             api_url: "https://localhost:55000".to_string(),
             api_user: "wazuh".to_string(),
-            api_password: "test".to_string(),
+            api_password: "test".to_string().into(),
             ca_cert: None,
             client_cert: None,
             client_key: None,
