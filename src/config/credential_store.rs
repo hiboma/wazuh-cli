@@ -17,6 +17,11 @@ use std::fmt;
 
 /// Service name used by the wazuh-cli Keychain backend. All entries
 /// this tool manages are scoped under this service.
+///
+/// Only the macOS backend reads this; non-macOS builds compile the
+/// constant but never reference it, so silence dead_code there rather
+/// than duplicating the definition behind a cfg.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const KEYCHAIN_SERVICE: &str = "dev.wazuh-cli";
 
 /// Logical key for the Wazuh API password stored in the Keychain.
@@ -31,6 +36,13 @@ pub enum StoreError {
     Unavailable(String),
     /// A real access failure. Surface to the user and do NOT fall
     /// through, to avoid silently using a stale secret.
+    ///
+    /// Only the macOS Keychain backend constructs this; `UnavailableStore`
+    /// reports everything as `Unavailable`. The variant stays in the enum
+    /// on every platform so `resolve()`'s match arms — and the "never fall
+    /// through on a backend failure" rule they encode — are identical
+    /// across targets.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Backend(String),
 }
 
@@ -47,7 +59,12 @@ impl std::error::Error for StoreError {}
 
 pub trait CredentialStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, StoreError>;
+    /// Only the `credentials` subcommand writes, and that subcommand is
+    /// macOS-only. Keep the methods on the trait for every platform so
+    /// the abstraction stays whole when a Linux backend is added.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn set(&self, key: &str, value: &str) -> Result<(), StoreError>;
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn delete(&self, key: &str) -> Result<(), StoreError>;
 }
 
