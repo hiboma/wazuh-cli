@@ -1,8 +1,12 @@
-use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 
 pub mod agent;
 pub mod cluster;
+#[cfg(target_os = "macos")]
+pub mod credentials;
 pub mod decoder;
 pub mod group;
 pub mod manager;
@@ -74,6 +78,12 @@ pub struct GlobalOpts {
     /// Show progress messages on stderr during auto-paging
     #[arg(long, global = true)]
     pub progress: bool,
+
+    /// Path to a TOML config file. Overrides the `WAZUH_CONFIG`
+    /// environment variable and the default
+    /// `~/.config/wazuh-cli/config.toml` location.
+    #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -136,6 +146,10 @@ pub enum Command {
     /// API information
     #[command(name = "api-info")]
     ApiInfo,
+
+    /// Manage credentials stored in the macOS Keychain (macOS only)
+    #[cfg(target_os = "macos")]
+    Credentials(credentials::CredentialsCommand),
 
     /// Generate shell completion script
     Completion {

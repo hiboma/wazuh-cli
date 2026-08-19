@@ -136,6 +136,131 @@ wazuh-cli completion fish > ~/.config/fish/completions/wazuh-cli.fish
 
 ## Configuration
 
+### Credential storage (macOS Keychain)
+
+On macOS, `WAZUH_API_PASSWORD` can be stored in the login Keychain
+instead of an environment variable. The resolution order for the
+password is:
+
+1. `--api-password` CLI option
+2. `WAZUH_API_PASSWORD` environment variable
+3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+
+Storing the password in the Keychain keeps it out of plaintext config
+files, dotfile backups, Time Machine snapshots, and shell history, and
+prevents malware running as the same uid from reading it with a simple
+file read.
+
+```bash
+# Prompt for the password (hidden input) and store it:
+wazuh-cli credentials set api-password
+
+# Or read from stdin (pipe-friendly):
+printf '%s' "$PASSWORD" | wazuh-cli credentials set api-password --stdin
+
+# Or read from a 0o600 file — useful for 1Password / sops integration:
+op read 'op://vault/wazuh/password' > /tmp/s && chmod 600 /tmp/s \
+  && wazuh-cli credentials set api-password --file /tmp/s \
+  && rm /tmp/s
+
+# See whether a password is stored (value is NOT printed):
+wazuh-cli credentials status            # TSV on stdout, header on stderr
+wazuh-cli credentials status --json     # machine-readable
+
+# Remove the entry:
+wazuh-cli credentials delete api-password
+```
+
+`credentials set` strips only a single trailing `\r` / `\n` / `\r\n`
+from the input — any other trailing character (including a plain
+space) is preserved byte-for-byte so a password with real trailing
+whitespace is not silently mangled.
+
+`--file` enforces:
+
+- the path is not a symlink (opened with `O_NOFOLLOW`),
+- the file is a regular file (not a FIFO, socket, directory, or
+  device),
+- the file is owned by the current user,
+- the mode has `0o077` cleared (no group/world access).
+
+Any of these failing produces a specific error — e.g. mode `0644`
+prints `Run \`chmod 600 /path\` and retry`, a missing path prints a
+hint that shell `~` is not expanded by clap.
+
+The Keychain entry lands under service `dev.wazuh-cli`, account
+`api_password` (underscore on the Keychain side, `api-password` as
+the CLI arg value — `credentials status` displays the hyphenated
+form to match the CLI). If you open Keychain Access.app to inspect
+or delete the entry manually, search for `api_password`.
+
+Note: other hiboma CLIs use `credentials status --format json`
+instead of `--json`. wazuh-cli uses a bare `--json` flag for
+consistency with `wazuh-cli`'s existing `--raw` style globals. Both
+forms produce the same JSON shape (`{"ok": bool, "service": str,
+"entries": {...}}`).
+
+There is intentionally no `credentials get` subcommand. The value never
+has to leave the Keychain for any legitimate workflow; exposing one
+would invite leakage into shell history, terminal scrollback, and
+AI-agent transcripts.
+
+#### Notes on Keychain prompts
+
+- The first Keychain read prompts the user. Clicking "Always Allow"
+  pins the entry and suppresses further prompts.
+- The ACL is tied to the binary's code signature. Any rebuild that
+  changes the signature — `cargo install`, `cargo build --release`
+  run locally, **or** `brew upgrade wazuh-cli` replacing the tapped
+  binary — will cause the Keychain to prompt again on the next
+  access. If `credentials status` reports an error, open
+  **Keychain Access.app**, find the `dev.wazuh-cli` entry, and
+  re-grant access via the **Access Control** tab (or delete and
+  re-store the entry with `credentials set api-password`).
+- On non-macOS builds the Keychain backend is absent; resolution uses
+  CLI + env var + config file only, and the `credentials` subcommand
+  is not compiled in.
+
+### Configuration file
+
+Non-secret settings can be written to a TOML file. Search order:
+
+1. `--config <PATH>` CLI option
+2. `WAZUH_CONFIG` environment variable
+3. `$XDG_CONFIG_HOME/wazuh-cli/config.toml`, falling back to
+   `~/.config/wazuh-cli/config.toml`
+
+Within the merge chain, the file sits **below** the Keychain:
+`CLI > env > Keychain (api_password only) > file > default`. So a
+rotated Keychain secret always wins over a stale password someone
+forgot to scrub from `config.toml`.
+
+Minimal example:
+
+```toml
+[api]
+url  = "https://wazuh-manager:55000"
+user = "wazuh"
+# DO NOT set `password = "..."` here. wazuh-cli IGNORES that field
+# and prints a warning; use `credentials set api-password` instead.
+
+[tls]
+ca_cert     = "/etc/wazuh/ca.pem"
+client_cert = "/etc/wazuh/client.pem"
+client_key  = "/etc/wazuh/client-key.pem"
+insecure    = false
+
+[request]
+timeout = 30
+```
+
+Unknown keys are rejected at parse time — `clinet_cert` will error
+out loudly rather than be silently ignored.
+
+When the file is `--config` or `WAZUH_CONFIG`, a missing / unreadable
+path is a hard error (so typos surface). The default-location file
+is optional; when absent, resolution simply falls through.
+
 ### Environment variables
 
 | Variable | Description | Default |
