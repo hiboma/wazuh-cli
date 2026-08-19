@@ -11,6 +11,10 @@ pub async fn run(client: &WazuhClient, cmd: AgentCommand) -> Result<Value, Wazuh
         AgentAction::List {
             status,
             group,
+            search,
+            query: q,
+            select,
+            sort,
             limit,
             offset,
         } => {
@@ -20,6 +24,18 @@ pub async fn run(client: &WazuhClient, cmd: AgentCommand) -> Result<Value, Wazuh
             }
             if let Some(ref g) = group {
                 query.push(("group", g.as_str()));
+            }
+            if let Some(ref s) = search {
+                query.push(("search", s.as_str()));
+            }
+            if let Some(ref q) = q {
+                query.push(("q", q.as_str()));
+            }
+            if let Some(ref s) = select {
+                query.push(("select", s.as_str()));
+            }
+            if let Some(ref s) = sort {
+                query.push(("sort", s.as_str()));
             }
             if limit.is_none() && offset.is_none() {
                 return client.get_all_pages("/agents", &query, PAGE_SIZE).await;

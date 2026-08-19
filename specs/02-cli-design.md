@@ -34,7 +34,8 @@ The basic pattern is `wazuh-cli <resource> <action>`.
 #### agent
 
 ```
-wazuh-cli agent list [--status <status>] [--group <group>] [--limit <n>] [--offset <n>]
+wazuh-cli agent list [--status <status>] [--group <group>] [--search <term>] [--query <q>]
+                     [--select <fields>] [--sort <fields>] [--limit <n>] [--offset <n>]
 wazuh-cli agent get <agent_id>
 wazuh-cli agent create --name <name> --ip <ip>
 wazuh-cli agent delete <agent_id> [<agent_id>...]
@@ -321,6 +322,7 @@ When both `--limit` and `--offset` are omitted, the CLI automatically fetches al
 - Stops at a maximum of 100 pages (50,000 items).
 - If either `--limit` or `--offset` is specified, auto-pagination is disabled.
 - When `--progress` is specified, progress messages are output to stderr starting from the 2nd page onward (no output if the result fits in a single page).
+- Filter parameters such as `--search`, `--query` and `--status` are sent on every page request, so auto-pagination collects all items that match the filter rather than all items on the manager.
 
 ```
 Fetching... 500/1500
@@ -347,3 +349,43 @@ Filter parameters supported by the API are provided as CLI options.
 wazuh-cli agent list --status active --group default
 wazuh-cli rule list --level 10-15 --group web
 ```
+
+### Search and Query
+
+`agent list` supports the API's two distinct filtering mechanisms. Both are applied
+server-side, so there is no need to fetch every agent and filter locally.
+
+| Option | API parameter | Semantics |
+|---|---|---|
+| `--search <term>` | `search` | Partial match across fields including `name` and `ip` |
+| `--query <q>` | `q` | Field-specific filter with exact match and comparison operators |
+
+```
+# Partial match: returns every agent whose name or ip contains "compute-"
+wazuh-cli agent list --search compute-
+
+# Field-specific exact match
+wazuh-cli agent list --query 'name=compute-1'
+wazuh-cli agent list --query 'ip=10.0.0.1'
+
+# The q syntax combines conditions with ';' (AND) and ',' (OR)
+wazuh-cli agent list --query 'status=active;os.platform=ubuntu'
+```
+
+### Field Selection and Sorting
+
+| Option | API parameter | Semantics |
+|---|---|---|
+| `--select <fields>` | `select` | Comma-separated list of fields to return, which reduces response size |
+| `--sort <fields>` | `sort` | Comma-separated sort fields, where a `-` prefix means descending |
+
+```
+wazuh-cli agent list --select id,name,ip,status
+wazuh-cli agent list --sort -name
+wazuh-cli agent list --search compute- --select id,name,ip --sort name
+```
+
+Because a descending `--sort` value begins with `-`, both `--sort -name` and
+`--sort=-name` are accepted. A value beginning with `--` is rejected as a usage
+error, so an omitted value such as `agent list --sort --insecure` does not
+consume the following option as the sort field.

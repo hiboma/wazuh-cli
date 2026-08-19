@@ -65,6 +65,112 @@ fn agent_help_contains_all_actions() {
 }
 
 #[test]
+fn agent_list_help_contains_filter_options() {
+    let output = wazuh_cli()
+        .args(["agent", "list", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    let expected = vec![
+        "--status", "--group", "--search", "--query", "--select", "--sort", "--limit", "--offset",
+    ];
+    for option in &expected {
+        assert!(
+            help.contains(option),
+            "agent list help missing option: {}",
+            option
+        );
+    }
+}
+
+#[test]
+fn agent_list_accepts_filter_options() {
+    // Parsing must succeed before any network access is attempted, so a missing
+    // --api-url is the expected failure mode rather than a clap usage error (exit 2).
+    let output = wazuh_cli()
+        .args([
+            "agent",
+            "list",
+            "--status",
+            "active",
+            "--group",
+            "default",
+            "--search",
+            "compute-",
+            "--query",
+            "ip=10.0.0.1",
+            "--select",
+            "id,name,ip",
+            "--sort",
+            "name",
+            "--limit",
+            "10",
+            "--offset",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "agent list filter options should parse without a usage error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn agent_list_sort_accepts_descending_prefix() {
+    // A descending sort value starts with '-', which clap would otherwise treat as
+    // an unknown flag. allow_hyphen_values keeps the space-separated form working.
+    for sort_value in ["-name", "-status,name"] {
+        let output = wazuh_cli()
+            .args(["agent", "list", "--sort", sort_value])
+            .output()
+            .unwrap();
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "agent list --sort {} should parse without a usage error: {}",
+            sort_value,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn agent_list_sort_rejects_a_following_option_as_its_value() {
+    // allow_hyphen_values stops clap from rejecting a following option, so an
+    // omitted value mid-command would otherwise consume the next flag and
+    // silently drop it. A value_parser restores the usage error.
+    for swallowed in ["--insecure", "--raw", "--quiet", "--limit"] {
+        let output = wazuh_cli()
+            .args(["agent", "list", "--sort", swallowed])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "agent list --sort {} should be a usage error, not silently swallow the flag: {}",
+            swallowed,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn agent_list_sort_still_requires_a_value() {
+    let status = wazuh_cli()
+        .args(["agent", "list", "--sort"])
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "agent list --sort without a value should be a usage error"
+    );
+}
+
+#[test]
 fn group_help_contains_all_actions() {
     let output = wazuh_cli().args(["group", "--help"]).output().unwrap();
     let help = String::from_utf8(output.stdout).unwrap();

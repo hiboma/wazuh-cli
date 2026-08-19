@@ -53,6 +53,16 @@ wazuh-cli agent list | grep active
 # Extract fields with jq
 wazuh-cli agent list | jq -r '.name'
 
+# Search agents by partial name or IP match (filtered server-side)
+wazuh-cli agent list --search compute-
+
+# Filter on a specific field with the API query syntax
+wazuh-cli agent list --query 'name=compute-1'
+wazuh-cli agent list --query 'status=active;os.platform=ubuntu'
+
+# Return only the fields you need, sorted (a '-' prefix sorts descending)
+wazuh-cli agent list --select id,name,ip,status --sort -name
+
 # Get manager info (pretty-printed JSON)
 wazuh-cli manager info
 

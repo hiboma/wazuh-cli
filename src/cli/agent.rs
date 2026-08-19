@@ -1,5 +1,24 @@
 use clap::{Args, Subcommand};
 
+/// Validates a `--sort` value.
+///
+/// `--sort` sets `allow_hyphen_values` so that a descending sort such as
+/// `--sort -name` parses instead of being rejected as an unknown flag. That
+/// also stops clap from rejecting a following option when the value is
+/// omitted, so `agent list --sort --insecure` would otherwise consume
+/// `--insecure` as the sort value and silently drop the flag. A Wazuh sort
+/// field never begins with `--`, so rejecting that prefix restores the error
+/// without giving up the `-name` form.
+fn parse_sort_value(value: &str) -> Result<String, String> {
+    if value.starts_with("--") {
+        return Err(format!(
+            "invalid sort field '{value}' (a value starting with '--' looks like a command-line \
+             option; use '-field' for descending order)"
+        ));
+    }
+    Ok(value.to_string())
+}
+
 #[derive(Args)]
 #[command(about = "Agent management")]
 pub struct AgentCommand {
@@ -18,6 +37,22 @@ pub enum AgentAction {
         /// Filter by group name
         #[arg(long)]
         group: Option<String>,
+
+        /// Search term (partial match against name, ip and other fields)
+        #[arg(long)]
+        search: Option<String>,
+
+        /// API query filter (e.g. "name=compute-1", "ip=10.0.0.1;status=active")
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Comma-separated fields to return (e.g. "id,name,ip,status")
+        #[arg(long)]
+        select: Option<String>,
+
+        /// Comma-separated fields to sort by, prefix with '-' for descending (e.g. "-name")
+        #[arg(long, allow_hyphen_values = true, value_parser = parse_sort_value)]
+        sort: Option<String>,
 
         /// Maximum number of items to return
         #[arg(long)]
