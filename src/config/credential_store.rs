@@ -1,10 +1,16 @@
 //! Credential store abstraction.
 //!
 //! On macOS, `KeychainStore` backs this trait with the login keychain
-//! via the `keyring` crate. On other platforms (and in test builds)
-//! we fall through to `UnavailableStore`, which reports every key as
-//! unstored. That lets `Config::from_cli_and_env` keep working without
-//! special-casing at the call site.
+//! via the `keyring` crate. On other platforms we fall through to
+//! `UnavailableStore`, which reports every key as unstored. That lets
+//! `Config::from_cli_and_env` keep working without special-casing at
+//! the call site.
+//!
+//! Note that `default_store()` returns the *real* Keychain backend on
+//! macOS even under `cfg(test)`. Unit tests must therefore inject
+//! `MemoryStore` explicitly rather than relying on a test build to be
+//! inert — otherwise they read the developer's live credential. See
+//! `specs/07-testing.md` ("Unit Test Isolation").
 //!
 //! `StoreError::Unavailable` vs `StoreError::Backend` is the load-bearing
 //! distinction: `Unavailable` means "there is nothing to read from at
