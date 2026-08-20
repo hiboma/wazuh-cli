@@ -243,6 +243,29 @@ fn security_help_contains_all_actions() {
 }
 
 #[test]
+fn version_flag_reports_the_crate_version() {
+    // The Homebrew formula's test block asserts the formula version appears in
+    // `wazuh-cli --version` output, so this flag has to exist and track Cargo.toml.
+    for flag in ["--version", "-V"] {
+        let output = wazuh_cli().arg(flag).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{} should exit zero: {}",
+            flag,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout.contains(env!("CARGO_PKG_VERSION")),
+            "{} output {:?} should contain the crate version {}",
+            flag,
+            stdout.trim(),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}
+
+#[test]
 fn unknown_subcommand_exits_with_code_2() {
     let status = wazuh_cli().arg("nonexistent").status().unwrap();
     assert_eq!(status.code(), Some(2));

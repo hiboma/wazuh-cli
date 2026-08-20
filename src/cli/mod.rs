@@ -20,7 +20,11 @@ pub mod syscheck;
 pub mod syscollector;
 
 #[derive(Parser)]
-#[command(name = "wazuh-cli", about = "Wazuh REST API CLI")]
+#[command(
+    name = "wazuh-cli",
+    about = "Wazuh REST API CLI",
+    version = env!("CARGO_PKG_VERSION")
+)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalOpts,
