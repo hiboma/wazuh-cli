@@ -406,14 +406,116 @@ mod tests {
         }
     }
 
+    /// Every `WAZUH_*` variable the resolver reads. A unit test must
+    /// start from a known-empty environment: the developer's own shell
+    /// routinely exports these (pointing at a real Wazuh deployment),
+    /// which would otherwise silently override the tier under test.
+    const WAZUH_ENV_VARS: &[&str] = &[
+        "WAZUH_API_URL",
+        "WAZUH_API_USER",
+        "WAZUH_API_PASSWORD",
+        "WAZUH_CA_CERT",
+        "WAZUH_CLIENT_CERT",
+        "WAZUH_CLIENT_KEY",
+        "WAZUH_INSECURE",
+        "WAZUH_OUTPUT",
+        "WAZUH_TIMEOUT",
+        "WAZUH_CONFIG",
+    ];
+
+    /// Clears every `WAZUH_*` variable on construction and restores the
+    /// original values on drop, so a test neither inherits the
+    /// developer's ambient configuration nor leaks its own mutations
+    /// into the next test.
+    ///
+    /// Restoring on `Drop` (rather than at the end of the test body)
+    /// means a panicking assertion still cleans up — a plain
+    /// `remove_var` at the bottom of the test is skipped on unwind and
+    /// poisons every later test in the same process.
+    ///
+    /// Sound only because the crate runs tests with `--test-threads=1`;
+    /// `std::env::set_var` is `unsafe` precisely because concurrent
+    /// readers in other threads are a data race.
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new() -> Self {
+            let saved = WAZUH_ENV_VARS
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect();
+            for k in WAZUH_ENV_VARS {
+                unsafe { std::env::remove_var(k) };
+            }
+            Self { saved }
+        }
+
+        fn set(&self, key: &str, value: &str) {
+            assert!(
+                WAZUH_ENV_VARS.contains(&key),
+                "{} is not in WAZUH_ENV_VARS, so EnvGuard would not restore it",
+                key
+            );
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    /// Resolve a Config from CLI + env only, with the credential store
+    /// and config file explicitly stubbed out.
+    ///
+    /// Unit tests must never call `Config::from_cli_and_env`: that
+    /// helper consults the *real* platform credential store (the macOS
+    /// login Keychain) and the *real* `~/.config/wazuh-cli/config.toml`.
+    /// On a developer machine that has run `wazuh-cli credentials set
+    /// api-password`, the live secret flows into the assertion — and a
+    /// failing `assert_eq!` prints it in plaintext to the terminal and
+    /// to any CI log. Injecting an empty `MemoryStore` keeps the test
+    /// hermetic and keeps real secrets out of test output.
+    fn resolve_isolated(cli: &CliOpts) -> Result<Config, WazuhError> {
+        Config::from_cli_env_store_and_file(cli, None, &MemoryStore::new(), None)
+    }
+
+    /// Compare the resolved password without ever formatting the actual
+    /// value into the panic message.
+    ///
+    /// `assert_eq!(config.api_password.as_str(), "")` looks harmless but
+    /// defeats every masking layer in this module: `as_str()` hands back
+    /// a bare `&str`, and `assert_eq!` `Debug`-formats it on failure. If
+    /// resolution unexpectedly picked up a real credential, that
+    /// credential is what gets printed. Compare first, then report only
+    /// the expected value and the observed length.
+    fn assert_password_eq(actual: &Zeroizing<String>, expected: &str) {
+        assert!(
+            actual.as_str() == expected,
+            "api_password mismatch: expected {:?}, got a different value of length {} \
+             (value withheld: it may be a real credential)",
+            expected,
+            actual.len()
+        );
+    }
+
     #[test]
     fn test_default_values() {
+        let _env = EnvGuard::new();
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert_eq!(config.api_url, "https://localhost:55000");
         assert_eq!(config.api_user, "wazuh");
-        assert_eq!(config.api_password.as_str(), "");
+        assert_password_eq(&config.api_password, "");
         assert!(!config.insecure);
         assert_eq!(config.timeout, 30);
         assert!(config.ca_cert.is_none());
@@ -423,6 +525,7 @@ mod tests {
 
     #[test]
     fn test_cli_opts_override() {
+        let _env = EnvGuard::new();
         let cli = CliOpts {
             api_url: Some("https://custom:9200".to_string()),
             api_user: Some("admin".to_string()),
@@ -437,11 +540,11 @@ mod tests {
             timeout: Some(60),
             config: None,
         };
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert_eq!(config.api_url, "https://custom:9200");
         assert_eq!(config.api_user, "admin");
-        assert_eq!(config.api_password.as_str(), "secret");
+        assert_password_eq(&config.api_password, "secret");
         assert_eq!(config.ca_cert.unwrap(), "/path/to/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/path/to/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/path/to/key.pem");
@@ -451,195 +554,149 @@ mod tests {
 
     #[test]
     fn test_invalid_output_format() {
+        let _env = EnvGuard::new();
         let cli = CliOpts {
             output: Some("xml".to_string()),
             ..default_cli_opts()
         };
-        let result = Config::from_cli_and_env(&cli);
+        let result = resolve_isolated(&cli);
 
         assert!(result.is_err());
     }
 
     #[test]
     fn test_env_var_fallback() {
-        unsafe {
-            std::env::set_var("WAZUH_API_URL", "https://env-host:55000");
-            std::env::set_var("WAZUH_API_USER", "env_user");
-            std::env::set_var("WAZUH_API_PASSWORD", "env_pass");
-            std::env::set_var("WAZUH_CA_CERT", "/env/ca.pem");
-            std::env::set_var("WAZUH_CLIENT_CERT", "/env/cert.pem");
-            std::env::set_var("WAZUH_CLIENT_KEY", "/env/key.pem");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_API_URL", "https://env-host:55000");
+        env.set("WAZUH_API_USER", "env_user");
+        env.set("WAZUH_CA_CERT", "/env/ca.pem");
+        env.set("WAZUH_CLIENT_CERT", "/env/cert.pem");
+        env.set("WAZUH_CLIENT_KEY", "/env/key.pem");
 
+        // `WAZUH_API_PASSWORD` is supplied as the captured
+        // `env_password` argument rather than through the process
+        // environment, because that is how `main.rs` supplies it: it
+        // reads and scrubs the real variable before any subcommand
+        // dispatches, so the resolver never re-reads it from `env`.
+        let env_pw = Zeroizing::new("env_pass".to_string());
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config =
+            Config::from_cli_env_store_and_file(&cli, Some(&env_pw), &MemoryStore::new(), None)
+                .unwrap();
 
         assert_eq!(config.api_url, "https://env-host:55000");
         assert_eq!(config.api_user, "env_user");
-        assert_eq!(config.api_password.as_str(), "env_pass");
+        assert_password_eq(&config.api_password, "env_pass");
         assert_eq!(config.ca_cert.unwrap(), "/env/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/env/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/env/key.pem");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_URL");
-            std::env::remove_var("WAZUH_API_USER");
-            std::env::remove_var("WAZUH_API_PASSWORD");
-            std::env::remove_var("WAZUH_CA_CERT");
-            std::env::remove_var("WAZUH_CLIENT_CERT");
-            std::env::remove_var("WAZUH_CLIENT_KEY");
-        }
     }
 
     #[test]
     fn test_env_var_insecure_true() {
-        unsafe {
-            std::env::set_var("WAZUH_INSECURE", "true");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_INSECURE", "true");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert!(config.insecure);
-
-        unsafe {
-            std::env::remove_var("WAZUH_INSECURE");
-        }
     }
 
     #[test]
     fn test_env_var_insecure_yes() {
-        unsafe {
-            std::env::set_var("WAZUH_INSECURE", "YES");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_INSECURE", "YES");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert!(config.insecure);
-
-        unsafe {
-            std::env::remove_var("WAZUH_INSECURE");
-        }
     }
 
     #[test]
     fn test_env_var_insecure_one() {
-        unsafe {
-            std::env::set_var("WAZUH_INSECURE", "1");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_INSECURE", "1");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert!(config.insecure);
-
-        unsafe {
-            std::env::remove_var("WAZUH_INSECURE");
-        }
     }
 
     #[test]
     fn test_env_var_insecure_false() {
-        unsafe {
-            std::env::set_var("WAZUH_INSECURE", "no");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_INSECURE", "no");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert!(!config.insecure);
-
-        unsafe {
-            std::env::remove_var("WAZUH_INSECURE");
-        }
     }
 
     #[test]
     fn test_env_var_output_format() {
-        unsafe {
-            std::env::set_var("WAZUH_OUTPUT", "json");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_OUTPUT", "json");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert!(matches!(config.output_format, OutputFormat::Json));
-
-        unsafe {
-            std::env::remove_var("WAZUH_OUTPUT");
-        }
     }
 
     #[test]
     fn test_env_var_timeout() {
-        unsafe {
-            std::env::set_var("WAZUH_TIMEOUT", "60");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_TIMEOUT", "60");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert_eq!(config.timeout, 60);
-
-        unsafe {
-            std::env::remove_var("WAZUH_TIMEOUT");
-        }
     }
 
     #[test]
     fn test_env_var_timeout_invalid() {
-        unsafe {
-            std::env::set_var("WAZUH_TIMEOUT", "not_a_number");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_TIMEOUT", "not_a_number");
 
         let cli = default_cli_opts();
-        let result = Config::from_cli_and_env(&cli);
+        let result = resolve_isolated(&cli);
 
         assert!(result.is_err());
-
-        unsafe {
-            std::env::remove_var("WAZUH_TIMEOUT");
-        }
     }
 
     #[test]
     fn test_cli_overrides_env() {
-        unsafe {
-            std::env::set_var("WAZUH_API_URL", "https://env-host:55000");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_API_URL", "https://env-host:55000");
 
         let cli = CliOpts {
             api_url: Some("https://cli-host:55000".to_string()),
             ..default_cli_opts()
         };
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert_eq!(config.api_url, "https://cli-host:55000");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_URL");
-        }
     }
 
     #[test]
     fn test_empty_env_var_uses_default() {
-        unsafe {
-            std::env::set_var("WAZUH_API_URL", "");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_API_URL", "");
 
         let cli = default_cli_opts();
-        let config = Config::from_cli_and_env(&cli).unwrap();
+        let config = resolve_isolated(&cli).unwrap();
 
         assert_eq!(config.api_url, "https://localhost:55000");
-
-        unsafe {
-            std::env::remove_var("WAZUH_API_URL");
-        }
     }
 
     #[test]
     fn test_api_password_from_credential_store_when_env_unset() {
+        let _env = EnvGuard::new();
         // No CLI, no env -> should fall through to the credential store.
         let store = MemoryStore::new();
         store
@@ -649,11 +706,12 @@ mod tests {
         let cli = default_cli_opts();
         let config = Config::from_cli_env_and_store(&cli, None, &store).unwrap();
 
-        assert_eq!(config.api_password.as_str(), "from-keychain");
+        assert_password_eq(&config.api_password, "from-keychain");
     }
 
     #[test]
     fn test_env_wins_over_credential_store() {
+        let _env = EnvGuard::new();
         let store = MemoryStore::new();
         store
             .set(credential_store::KEY_API_PASSWORD, "from-keychain")
@@ -663,11 +721,12 @@ mod tests {
         let cli = default_cli_opts();
         let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
 
-        assert_eq!(config.api_password.as_str(), "from-env");
+        assert_password_eq(&config.api_password, "from-env");
     }
 
     #[test]
     fn test_cli_wins_over_env_and_credential_store() {
+        let _env = EnvGuard::new();
         let store = MemoryStore::new();
         store
             .set(credential_store::KEY_API_PASSWORD, "from-keychain")
@@ -680,11 +739,12 @@ mod tests {
         };
         let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
 
-        assert_eq!(config.api_password.as_str(), "from-cli");
+        assert_password_eq(&config.api_password, "from-cli");
     }
 
     #[test]
     fn test_credential_store_backend_error_propagates_and_not_fallthrough() {
+        let _env = EnvGuard::new();
         // No CLI, no env -> would normally fall through to the store.
         // The store returns Backend, which must surface as a
         // CredentialStore error (NOT silently produce an empty
@@ -704,6 +764,7 @@ mod tests {
 
     #[test]
     fn test_file_supplies_api_url_when_cli_and_env_unset() {
+        let _env = EnvGuard::new();
         // The config-file tier only kicks in when CLI and env do
         // not supply a value. Pin that contract so a rewrite cannot
         // silently promote the file above env.
@@ -727,9 +788,8 @@ mod tests {
         // WAZUH_API_URL > file. This env access runs inside a
         // single-threaded test runner (--test-threads=1) which the
         // crate enforces precisely so env mutations do not collide.
-        unsafe {
-            std::env::set_var("WAZUH_API_URL", "https://from-env:55000");
-        }
+        let env = EnvGuard::new();
+        env.set("WAZUH_API_URL", "https://from-env:55000");
         let file = file::ConfigFile {
             api: file::ApiSection {
                 url: Some("https://from-file:55000".to_string()),
@@ -742,13 +802,11 @@ mod tests {
         let cli = default_cli_opts();
         let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
         assert_eq!(config.api_url, "https://from-env:55000");
-        unsafe {
-            std::env::remove_var("WAZUH_API_URL");
-        }
     }
 
     #[test]
     fn test_cli_wins_over_file_for_api_url() {
+        let _env = EnvGuard::new();
         let file = file::ConfigFile {
             api: file::ApiSection {
                 url: Some("https://from-file:55000".to_string()),
@@ -768,6 +826,7 @@ mod tests {
 
     #[test]
     fn test_keychain_wins_over_file_password_because_file_password_is_ignored() {
+        let _env = EnvGuard::new();
         // `[api] password` in the file is deliberately IGNORED by
         // the merge (file.rs's `load()` warns about it, and the
         // merge layer simply never reads `file.api.password`). So
@@ -786,11 +845,12 @@ mod tests {
             .unwrap();
         let cli = default_cli_opts();
         let config = Config::from_cli_env_store_and_file(&cli, None, &store, Some(&file)).unwrap();
-        assert_eq!(config.api_password.as_str(), "from-keychain");
+        assert_password_eq(&config.api_password, "from-keychain");
     }
 
     #[test]
     fn test_file_timeout_used_when_cli_and_env_unset() {
+        let _env = EnvGuard::new();
         let file = file::ConfigFile {
             request: file::RequestSection { timeout: Some(77) },
             ..Default::default()
@@ -803,6 +863,7 @@ mod tests {
 
     #[test]
     fn test_file_tls_insecure_flag_merges() {
+        let _env = EnvGuard::new();
         let file = file::ConfigFile {
             tls: file::TlsSection {
                 insecure: Some(true),
@@ -818,6 +879,7 @@ mod tests {
 
     #[test]
     fn test_credential_store_backend_does_not_swallow_when_env_set() {
+        let _env = EnvGuard::new();
         // If the captured env password is set, resolve() should use
         // it and never even consult the store — so a Backend error
         // must not surface in that case. This pins the "env > store"
@@ -827,7 +889,52 @@ mod tests {
         let store = FailingStore::backend();
         let cli = default_cli_opts();
         let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
-        assert_eq!(config.api_password.as_str(), "from-env-bypass");
+        assert_password_eq(&config.api_password, "from-env-bypass");
+    }
+
+    #[test]
+    fn test_env_guard_clears_and_restores_wazuh_vars() {
+        // Pins the two properties every test in this module depends on:
+        // the ambient value is invisible inside the guard's scope, and
+        // it is put back afterwards (so running the suite does not
+        // mutate the developer's shell-inherited environment).
+        let outer = EnvGuard::new();
+        outer.set("WAZUH_API_URL", "https://ambient:55000");
+
+        {
+            let inner = EnvGuard::new();
+            assert!(
+                std::env::var("WAZUH_API_URL").is_err(),
+                "EnvGuard must hide the ambient value while in scope"
+            );
+            inner.set("WAZUH_API_URL", "https://inner:55000");
+        }
+
+        assert_eq!(
+            std::env::var("WAZUH_API_URL").unwrap(),
+            "https://ambient:55000",
+            "EnvGuard must restore the previous value on drop"
+        );
+    }
+
+    #[test]
+    fn test_default_resolution_ignores_ambient_wazuh_env() {
+        // The regression this module was fixed for: a developer shell
+        // exporting WAZUH_* (or a populated login Keychain) used to
+        // bleed into `test_default_values`. Setting a hostile ambient
+        // value here proves the guard, not luck, is what keeps the
+        // defaults test honest.
+        let env = EnvGuard::new();
+        env.set("WAZUH_API_URL", "https://should-not-be-read:55000");
+        env.set("WAZUH_API_USER", "should-not-be-read");
+
+        let inner = EnvGuard::new();
+        let config = resolve_isolated(&default_cli_opts()).unwrap();
+        drop(inner);
+
+        assert_eq!(config.api_url, "https://localhost:55000");
+        assert_eq!(config.api_user, "wazuh");
+        assert_password_eq(&config.api_password, "");
     }
 
     #[test]
