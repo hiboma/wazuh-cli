@@ -170,6 +170,22 @@ wazuh-cli syscollector netproto <agent_id>
 wazuh-cli syscollector hotfixes <agent_id>
 ```
 
+#### experimental
+
+```
+wazuh-cli experimental syscollector packages --agents-list 001,002 --filter name=openssl
+wazuh-cli experimental syscollector hardware --select agent_id,cpu.name
+wazuh-cli experimental ciscat results --limit 10 --filter benchmark=CIS
+wazuh-cli experimental rootcheck clear 001 002
+wazuh-cli experimental syscheck clear all
+```
+
+Experimental GET commands accept `--agents-list`, `--search`, `--select`,
+`--sort`, `--limit`, `--offset`, `--pretty`, `--wait-for-complete`, and repeatable
+`--filter parameter=value` for endpoint-specific filters. They do not accept
+`--query`, because the Experimental API does not define `q`. Clearing results
+requires explicit agent IDs or `all`; omitting IDs is a usage error.
+
 #### rootcheck
 
 ```
@@ -337,6 +353,7 @@ Target commands:
 - `rule list`, `decoder list`
 - `syscheck get`, `rootcheck get`
 - Each `syscollector` action (except hardware, os)
+- All `experimental` GET commands (including hardware and os)
 - Each `mitre` action (except metadata)
 - `security` user/role/policy/rule list
 - `list get`, `task status`

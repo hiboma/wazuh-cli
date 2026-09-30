@@ -85,6 +85,7 @@ wazuh-cli agent list --raw
 | `manager` | Manager information and management |
 | `security` | User, role, and policy management |
 | `syscheck` | File integrity monitoring |
+| `experimental` | Cross-agent inventory and result clearing |
 | `syscollector` | System inventory |
 | `rootcheck` | Rootkit detection |
 | `sca` | Security configuration assessment |
@@ -336,6 +337,31 @@ cargo clippy -- -D warnings
 ## Specs
 
 Design specifications are in `specs/`. See [specs/00-overview.md](specs/00-overview.md) for the project overview.
+
+### Experimental API
+
+```bash
+wazuh-cli experimental syscollector packages --agents-list 001,002 --filter name=openssl
+wazuh-cli experimental syscollector os --select agent_id,os.name
+wazuh-cli experimental ciscat results --limit 10
+wazuh-cli experimental rootcheck clear 001 002
+wazuh-cli experimental syscheck clear all
+```
+
+Enable `experimental_features: yes` in the server’s
+`/var/ossec/api/configuration/api.yaml` and restart the Wazuh API before use.
+Otherwise, the API returns HTTP 404 with error 1122.
+
+All Experimental GET commands automatically collect pages unless `--limit` or
+`--offset` is specified. Use `--search`, `--select`, `--sort`, and repeatable
+`--filter parameter=value` for the filters defined by each endpoint.
+`--agents-list` accepts comma-separated IDs; omitting it queries all agents.
+`rootcheck clear` and `syscheck clear` delete stored scan results and require
+explicit agent IDs or `all`. They do not delete agents.
+
+Auto-pagination uses the existing limit of 100 pages (50,000 items). For larger
+results, fetch batches explicitly with `--limit` (up to 100,000) and `--offset`.
+
 
 ## License
 

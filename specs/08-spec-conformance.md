@@ -72,8 +72,8 @@ Method: Parse 03-api-endpoints.md to extract the CLI command list, and create a 
 SPEC="specs/03-api-endpoints.md"
 MISSING=0
 
-# Extracts entries excluding experimental and internal endpoints
-grep -oP '`((?!excluded from initial implementation|internal:)[a-z][\w -]*[\w])`' "$SPEC" | \
+# Extracts entries excluding internal endpoints
+grep -oP '`((?!internal:)[a-z][\w -]*[\w])`' "$SPEC" | \
   sort -u | while read -r cmd; do
     # Checks whether a corresponding subcommand definition exists under cli/
     if ! grep -rq "$cmd" src/cli/; then

@@ -48,6 +48,7 @@ CLI subcommands correspond to the following API resources.
 | `manager` | /manager | Manager information and management |
 | `security` | /security | User, role, and policy management |
 | `syscheck` | /syscheck | File integrity monitoring |
+| `experimental` | /experimental | Cross-agent inventory and result clearing |
 | `syscollector` | /syscollector | System information collection |
 | `rootcheck` | /rootcheck | Rootkit detection |
 | `sca` | /sca | Security configuration assessment |
