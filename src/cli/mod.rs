@@ -8,6 +8,7 @@ pub mod cluster;
 #[cfg(target_os = "macos")]
 pub mod credentials;
 pub mod decoder;
+pub mod experimental;
 pub mod group;
 pub mod manager;
 pub mod mitre;
@@ -118,6 +119,9 @@ pub enum Command {
 
     /// System inventory
     Syscollector(syscollector::SyscollectorCommand),
+
+    /// Experimental cross-agent APIs
+    Experimental(experimental::ExperimentalCommand),
 
     /// Rootcheck management
     Rootcheck(rootcheck::RootcheckCommand),

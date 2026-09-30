@@ -9,7 +9,7 @@ use clap::{Args, Subcommand};
 /// `--insecure` as the sort value and silently drop the flag. A Wazuh sort
 /// field never begins with `--`, so rejecting that prefix restores the error
 /// without giving up the `-name` form.
-fn parse_sort_value(value: &str) -> Result<String, String> {
+pub(crate) fn parse_sort_value(value: &str) -> Result<String, String> {
     if value.starts_with("--") {
         return Err(format!(
             "invalid sort field '{value}' (a value starting with '--' looks like a command-line \

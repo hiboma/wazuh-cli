@@ -18,6 +18,7 @@ fn root_help_contains_all_subcommands() {
         "cluster",
         "syscheck",
         "syscollector",
+        "experimental",
         "rootcheck",
         "sca",
         "mitre",
