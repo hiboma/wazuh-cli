@@ -4,6 +4,7 @@ pub mod api_info;
 pub mod cluster;
 pub mod decoder;
 pub mod event;
+pub mod experimental;
 pub mod group;
 pub mod list;
 pub mod logtest;

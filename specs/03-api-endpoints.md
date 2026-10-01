@@ -201,20 +201,30 @@ This is the mapping of all Wazuh API v4.x endpoints to their corresponding CLI c
 
 ## Experimental
 
+All GET commands support `--agents-list`, `--search`, `--select`, `--sort`,
+`--limit`, `--offset`, `--pretty`, and `--wait-for-complete`. Endpoint-specific
+filters use repeatable `--filter <parameter>=<value>` (for example,
+`--filter name=openssl` or `--filter ram.free=1024`). Filters must be parameters
+listed for that endpoint in the official OpenAPI specification; `q` is not supported.
+GET commands auto-page when neither limit nor offset is supplied. DELETE commands
+require explicit agent IDs (or `all`) and accept `--pretty` and `--wait-for-complete`.
+
+Reference: [Wazuh API v4.14.8 OpenAPI](https://documentation.wazuh.com/current/_static/server-api-spec/spec-v4.14.8.yaml).
+
 | Method | Path | CLI Command |
 |---|---|---|
-| DELETE | `/experimental/rootcheck` | (excluded from initial implementation) |
-| DELETE | `/experimental/syscheck` | (excluded from initial implementation) |
-| GET | `/experimental/ciscat/results` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/hardware` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/netaddr` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/netiface` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/netproto` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/os` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/packages` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/ports` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/processes` | (excluded from initial implementation) |
-| GET | `/experimental/syscollector/hotfixes` | (excluded from initial implementation) |
+| DELETE | `/experimental/rootcheck` | `experimental rootcheck clear <agent_id> [<agent_id>...]` |
+| DELETE | `/experimental/syscheck` | `experimental syscheck clear <agent_id> [<agent_id>...]` |
+| GET | `/experimental/ciscat/results` | `experimental ciscat results` |
+| GET | `/experimental/syscollector/hardware` | `experimental syscollector hardware` |
+| GET | `/experimental/syscollector/netaddr` | `experimental syscollector netaddr` |
+| GET | `/experimental/syscollector/netiface` | `experimental syscollector netiface` |
+| GET | `/experimental/syscollector/netproto` | `experimental syscollector netproto` |
+| GET | `/experimental/syscollector/os` | `experimental syscollector os` |
+| GET | `/experimental/syscollector/packages` | `experimental syscollector packages` |
+| GET | `/experimental/syscollector/ports` | `experimental syscollector ports` |
+| GET | `/experimental/syscollector/processes` | `experimental syscollector processes` |
+| GET | `/experimental/syscollector/hotfixes` | `experimental syscollector hotfixes` |
 
 ## Syscollector
 

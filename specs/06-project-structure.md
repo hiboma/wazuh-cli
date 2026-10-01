@@ -24,6 +24,7 @@ wazuh-cli/
 │   │   ├── manager.rs          # manager subcommand
 │   │   ├── security.rs         # security subcommand
 │   │   ├── syscheck.rs         # syscheck subcommand
+│   │   ├── experimental.rs     # experimental subcommand
 │   │   ├── syscollector.rs     # syscollector subcommand
 │   │   ├── rootcheck.rs        # rootcheck subcommand
 │   │   ├── sca.rs              # sca subcommand
@@ -41,6 +42,7 @@ wazuh-cli/
 │   │   ├── cluster.rs          # /cluster endpoint
 │   │   ├── decoder.rs          # /decoders endpoint
 │   │   ├── event.rs            # /events endpoint
+│   │   ├── experimental.rs     # /experimental endpoints
 │   │   ├── group.rs            # /groups endpoint
 │   │   ├── list.rs             # /lists endpoint
 │   │   ├── logtest.rs          # /logtest endpoint
@@ -126,15 +128,15 @@ The following features are simplified at this time.
 
 - Configuration file support is omitted (only environment variables and CLI options).
 - table / csv output is omitted (JSON only).
-- Experimental endpoints are excluded.
 - Some endpoints listed in 03-api-endpoints.md are not yet implemented as CLI subcommands.
 
 ## Implemented Resources
 
-API calls for all 19 resources are implemented.
+API calls for all 20 resources are implemented.
 
 | Resource | CLI Subcommand | API Path Prefix |
 |---|---|---|
+| experimental | `wazuh-cli experimental` | /experimental |
 | agent | `wazuh-cli agent` | /agents |
 | group | `wazuh-cli group` | /groups |
 | manager | `wazuh-cli manager` | /manager |

@@ -197,6 +197,7 @@ async fn run(command: Command, config: &Config) -> Result<serde_json::Value, err
         Command::Cluster(cmd) => api::cluster::run(&client, cmd).await,
         Command::Syscheck(cmd) => api::syscheck::run(&client, cmd).await,
         Command::Syscollector(cmd) => api::syscollector::run(&client, cmd).await,
+        Command::Experimental(cmd) => api::experimental::run(&client, cmd).await,
         Command::Rootcheck(cmd) => api::rootcheck::run(&client, cmd).await,
         Command::Sca(cmd) => api::sca::run(&client, cmd).await,
         Command::Mitre(cmd) => api::mitre::run(&client, cmd).await,
