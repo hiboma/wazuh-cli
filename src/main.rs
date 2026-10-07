@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod error;
 mod output;
+mod secret;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
