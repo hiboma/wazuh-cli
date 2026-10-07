@@ -166,6 +166,17 @@ fn mock(expected: Vec<Expected>) -> (String, thread::JoinHandle<()>) {
                 bytes.extend_from_slice(&buf[..count]);
             }
             let request = String::from_utf8(bytes).unwrap();
+            let user_agent = request
+                .lines()
+                .skip(1)
+                .take_while(|line| !line.is_empty())
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+                .map(|(_, value)| value.trim());
+            assert_eq!(
+                user_agent,
+                Some(concat!("wazuh-cli/", env!("CARGO_PKG_VERSION")))
+            );
             let mut parts = request.lines().next().unwrap().split_whitespace();
             assert_eq!(parts.next().unwrap(), expected.method);
             let url =

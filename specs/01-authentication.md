@@ -73,6 +73,12 @@ sandbox) is classified as `Unavailable` and does fall through.
 
 ## 2. JWT Authentication
 
+### HTTP Request Headers
+
+All HTTP requests, including authentication and retries, send
+`User-Agent: wazuh-cli/<version>`. The version comes from the package version
+in `Cargo.toml` at build time.
+
 ### Authentication Flow
 
 ```
