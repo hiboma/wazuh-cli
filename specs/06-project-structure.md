@@ -58,6 +58,7 @@ wazuh-cli/
 │   │   └── task.rs             # /tasks endpoint
 │   ├── config.rs               # Configuration resolution (CLI > env vars > file)
 │   ├── output.rs               # Output formatter (json)
+│   ├── secret.rs               # Secret input (hidden prompt / stdin / file)
 │   └── error.rs                # Error type definitions
 ├── tests/
 │   ├── cli_conformance.rs      # CLI conformance tests
@@ -103,6 +104,15 @@ Resolve configuration from CLI options, environment variables, and configuration
 ### `output.rs` - Output Formatter
 
 Output API responses to stdout in the specified format (json, table, csv).
+
+### `secret.rs` - Secret Input
+
+Read secrets without taking them as command-line argument values: a hidden
+terminal prompt, stdin, or a file with restrictive permissions. Shared by
+`credentials set` and `security user create/update`. Also provides the
+value parser for removed secret options (`--api-password`, `--password`),
+which fails with a migration message that never echoes the value. See
+`02-cli-design.md`.
 
 ### `error.rs` - Error Types
 

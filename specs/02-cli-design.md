@@ -16,7 +16,6 @@ wazuh-cli [global-options] <resource> <action> [arguments] [options]
 |---|---|---|
 | `--api-url <URL>` | | API URL |
 | `--api-user <USER>` | `-u` | API username |
-| `--api-password <PASS>` | `-p` | API password |
 | `--ca-cert <PATH>` | | CA certificate path |
 | `--client-cert <PATH>` | | Client certificate path |
 | `--client-key <PATH>` | | Client private key path |
@@ -127,8 +126,8 @@ wazuh-cli security login
 wazuh-cli security logout
 wazuh-cli security user list
 wazuh-cli security user get-me
-wazuh-cli security user create --username <name> --password <pass>
-wazuh-cli security user update <user_id> [--password <pass>]
+wazuh-cli security user create --username <name> [--password-stdin | --password-file <path>]
+wazuh-cli security user update <user_id> [--password-stdin | --password-file <path>]
 wazuh-cli security user delete <user_id> [<user_id>...]
 wazuh-cli security role list
 wazuh-cli security role create --name <name>
@@ -146,6 +145,21 @@ wazuh-cli security config
 wazuh-cli security update-config
 wazuh-cli security reset-config
 ```
+
+`security user create` and `security user update` never take the password
+as an argument value. The password is read from one of:
+
+| Source | How | Notes |
+|---|---|---|
+| Prompt (default) | neither flag given | Read from the controlling terminal with echo off, asked twice; a mismatch is an error. Fails if no terminal is available |
+| stdin | `--password-stdin` | Up to 8 KiB, UTF-8. One trailing `\n` / `\r\n` is stripped. Refused when stdin is a terminal, because typed input would be echoed |
+| File | `--password-file <path>` | Must be a regular file (not a symlink, FIFO, or device) of at most 8 KiB. On Unix it must also be owned by the invoker, have no group/other permission bits (`chmod 600`), and have exactly one hard link. On Windows ownership and ACLs are not checked. One trailing newline is stripped |
+
+`--password-stdin` and `--password-file` conflict. An empty password is
+rejected. The former `--password <pass>` option is kept hidden only to fail
+with exit code 2 and a migration message; the message never echoes the
+value. The same input rules are shared with `credentials set` (`--stdin` /
+`--file`) via `src/secret.rs`.
 
 #### syscheck
 
