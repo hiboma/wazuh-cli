@@ -1,4 +1,8 @@
-use clap::{Args, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Args, Subcommand, ValueHint};
+
+use crate::secret::RemovedSecretOption;
 
 #[derive(Args)]
 #[command(about = "Security management")]
@@ -54,25 +58,26 @@ pub enum SecurityUserAction {
     #[command(name = "get-me")]
     GetMe,
 
-    /// Create a new user
+    /// Create a new user. The password is read from a hidden prompt,
+    /// --password-stdin, or --password-file, never from an argument.
     Create {
         /// Username
         #[arg(long)]
         username: String,
 
-        /// Password
-        #[arg(long)]
-        password: String,
+        #[command(flatten)]
+        password: PasswordInput,
     },
 
-    /// Update a user
+    /// Change a user's password. The password is read from a hidden
+    /// prompt, --password-stdin, or --password-file, never from an
+    /// argument.
     Update {
         /// User ID
         user_id: String,
 
-        /// New password
-        #[arg(long)]
-        password: Option<String>,
+        #[command(flatten)]
+        password: PasswordInput,
     },
 
     /// Delete one or more users
@@ -173,4 +178,37 @@ pub enum SecurityRuleAction {
         #[arg(required = true)]
         rule_ids: Vec<String>,
     },
+}
+
+/// How to supply a user password. Without either flag the password is
+/// prompted for on the terminal (input hidden, asked twice).
+#[derive(Args)]
+pub struct PasswordInput {
+    /// Read the password from stdin instead of prompting. A single
+    /// trailing newline is stripped.
+    ///
+    /// Example: op read 'op://vault/wazuh/alice' | wazuh-cli security user create --username alice --password-stdin
+    #[arg(long, conflicts_with = "password_file")]
+    pub password_stdin: bool,
+
+    /// Read the password from a file instead of prompting. The file must
+    /// be a regular file owned by you with no group/other permissions
+    /// (chmod 600). A single trailing newline is stripped.
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub password_file: Option<PathBuf>,
+
+    /// Removed. Kept hidden only to explain the replacement.
+    #[arg(
+        long = "password",
+        hide = true,
+        // Accept `--password -abc` as a value so clap's "unexpected
+        // argument" error never echoes part of the secret.
+        allow_hyphen_values = true,
+        value_name = "VALUE",
+        value_parser = RemovedSecretOption {
+            flag: "--password",
+            guidance: "Omit it to be prompted, or use --password-stdin / --password-file.",
+        }
+    )]
+    pub removed_password: Option<String>,
 }

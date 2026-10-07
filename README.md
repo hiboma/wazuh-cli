@@ -69,6 +69,14 @@ wazuh-cli manager info
 # List security users
 wazuh-cli security user list
 
+# Create a user. The password is prompted for (hidden, asked twice);
+# it is never accepted as an argument value.
+wazuh-cli security user create --username alice
+
+# ...or piped from a secret manager / read from a 0600 file
+op read 'op://vault/wazuh/alice' | wazuh-cli security user create --username alice --password-stdin
+wazuh-cli security user update 101 --password-file ./alice.pw
+
 # Get raw API response
 wazuh-cli agent list --raw
 ```
@@ -153,9 +161,17 @@ On macOS, `WAZUH_API_PASSWORD` can be stored in the login Keychain
 instead of an environment variable. The resolution order for the
 password is:
 
-1. `--api-password` CLI option
-2. `WAZUH_API_PASSWORD` environment variable
-3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+1. `WAZUH_API_PASSWORD` environment variable
+2. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+
+There is no CLI option for the password: a value passed as an argument
+ends up in shell history and is visible to `ps` and audit/EDR logs. The
+former `--api-password` / `-p` option was removed. To set the env var
+without leaving it in shell history:
+
+```bash
+read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD
+```
 
 Storing the password in the Keychain keeps it out of plaintext config
 files, dotfile backups, Time Machine snapshots, and shell history, and
@@ -242,7 +258,8 @@ Non-secret settings can be written to a TOML file. Search order:
    `~/.config/wazuh-cli/config.toml`
 
 Within the merge chain, the file sits **below** the Keychain:
-`CLI > env > Keychain (api_password only) > file > default`. So a
+`CLI > env > Keychain (api_password only) > file > default`
+(`api_password` has no CLI tier). So a
 rotated Keychain secret always wins over a stale password someone
 forgot to scrub from `config.toml`.
 
@@ -293,7 +310,6 @@ CLI options override environment variables.
 ```
 --api-url <URL>        API URL
 --api-user <USER>      API username (-u)
---api-password <PASS>  API password (-p)
 --ca-cert <PATH>       CA certificate path
 --client-cert <PATH>   Client certificate path
 --client-key <PATH>    Client private key path

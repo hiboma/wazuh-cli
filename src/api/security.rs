@@ -1,10 +1,23 @@
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use crate::cli::security::*;
 use crate::client::WazuhClient;
 use crate::error::WazuhError;
+use crate::secret::{SecretSource, read_secret};
 
 const PAGE_SIZE: u32 = 500;
+
+/// Read a user password from the source selected by `PasswordInput`.
+/// The prompt asks twice because this sets a password.
+///
+/// The returned value is wiped on drop. The copy inside the
+/// `serde_json::Value` request body is not, which is unavoidable
+/// without a custom serializer.
+fn read_user_password(input: &PasswordInput, label: &str) -> Result<Zeroizing<String>, WazuhError> {
+    let source = SecretSource::from_flags(input.password_stdin, input.password_file.as_deref());
+    read_secret(source, &format!("{} (input hidden): ", label), true)
+}
 
 pub async fn run(client: &WazuhClient, cmd: SecurityCommand) -> Result<Value, WazuhError> {
     match cmd.action {
@@ -32,20 +45,20 @@ async fn run_user(client: &WazuhClient, cmd: SecurityUserCommand) -> Result<Valu
         }
         SecurityUserAction::GetMe => client.get("/security/users/me", &[]).await,
         SecurityUserAction::Create { username, password } => {
+            let pw =
+                read_user_password(&password, &format!("Password for new user '{}'", username))?;
             client
                 .post(
                     "/security/users",
-                    &json!({"username": username, "password": password}),
+                    &json!({"username": username, "password": pw.as_str()}),
                 )
                 .await
         }
         SecurityUserAction::Update { user_id, password } => {
-            let mut body = json!({});
-            if let Some(pw) = password {
-                body["password"] = json!(pw);
-            }
+            let pw =
+                read_user_password(&password, &format!("New password for user ID {}", user_id))?;
             let path = format!("/security/users/{}", user_id);
-            client.put(&path, &body).await
+            client.put(&path, &json!({"password": pw.as_str()})).await
         }
         SecurityUserAction::Delete { user_ids } => {
             let ids = user_ids.join(",");

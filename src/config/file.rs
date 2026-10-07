@@ -180,7 +180,7 @@ fn warn_on_password_field(path: &Path, file: &ConfigFile) {
         eprintln!(
             "warning: {} contains a plaintext [api] password entry. \
              wazuh-cli IGNORES this field and sources the password \
-             from --api-password, WAZUH_API_PASSWORD, or the macOS \
+             from WAZUH_API_PASSWORD or the macOS \
              Keychain (in that priority order). Remove the field \
              from the file and run `wazuh-cli credentials set \
              api-password` to store the secret safely.",

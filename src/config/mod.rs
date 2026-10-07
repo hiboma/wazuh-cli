@@ -17,13 +17,6 @@ use credential_store::{CredentialStore, KEY_API_PASSWORD, StoreError, default_st
 pub struct CliOpts {
     pub api_url: Option<String>,
     pub api_user: Option<String>,
-    /// Wrapped in `Zeroizing` so that the plaintext moved from `argv`
-    /// via clap is wiped when `CliOpts` drops, rather than sitting on
-    /// the heap for the rest of the process. The original `argv`
-    /// slot that clap copies from is already exposed via `ps`, but
-    /// the in-process heap copy is recoverable from a core dump and
-    /// is the one under our control.
-    pub api_password: Option<Zeroizing<String>>,
     pub ca_cert: Option<String>,
     pub client_cert: Option<String>,
     pub client_key: Option<String>,
@@ -96,7 +89,8 @@ impl Config {
     /// Keychain) and, optionally, a TOML config file.
     ///
     /// Priority (first non-empty wins, per field):
-    ///     CLI options
+    ///     CLI options       (not for api_password: there is no CLI
+    ///                        option for it, see `specs/05-configuration.md`)
     ///   > environment variables
     ///   > credential store  (api_password only)
     ///   > config file       (~/.config/wazuh-cli/config.toml)
@@ -161,7 +155,7 @@ impl Config {
             Some("wazuh"),
         )?;
 
-        let api_password = resolve_api_password(&cli.api_password, env_password, store)?;
+        let api_password = resolve_api_password(env_password, store)?;
 
         let ca_cert = resolve_optional_string(
             cli.ca_cert.as_deref(),
@@ -223,24 +217,18 @@ impl Config {
     }
 }
 
-/// Resolve the API password in priority order: CLI > env > credential
-/// store. The store's `Unavailable` is treated as "no answer here, try
+/// Resolve the API password in priority order: env > credential
+/// store. There is deliberately no CLI tier: a password passed as an
+/// argument is exposed via `ps`, shell history, and audit/EDR logs.
+/// The store's `Unavailable` is treated as "no answer here, try
 /// the next tier" (so users who never opted into the Keychain still
 /// get the previous env-only behavior); `Backend` is surfaced as a
 /// hard error to avoid silently falling through to a stale source
 /// after a Keychain ACL denial.
 fn resolve_api_password(
-    cli_value: &Option<Zeroizing<String>>,
     env_password: Option<&Zeroizing<String>>,
     store: &dyn CredentialStore,
 ) -> Result<Zeroizing<String>, WazuhError> {
-    if let Some(v) = cli_value {
-        // Clone into a fresh Zeroizing so the returned value has an
-        // independent lifetime from `CliOpts`. Both the source and
-        // the clone are wiped on their respective drops.
-        return Ok(Zeroizing::new((**v).clone()));
-    }
-
     if let Some(v) = env_password {
         return Ok(Zeroizing::new((**v).clone()));
     }
@@ -393,7 +381,6 @@ mod tests {
         CliOpts {
             api_url: None,
             api_user: None,
-            api_password: None,
             ca_cert: None,
             client_cert: None,
             client_key: None,
@@ -529,7 +516,6 @@ mod tests {
         let cli = CliOpts {
             api_url: Some("https://custom:9200".to_string()),
             api_user: Some("admin".to_string()),
-            api_password: Some("secret".to_string().into()),
             ca_cert: Some("/path/to/ca.pem".to_string()),
             client_cert: Some("/path/to/cert.pem".to_string()),
             client_key: Some("/path/to/key.pem".to_string()),
@@ -544,7 +530,6 @@ mod tests {
 
         assert_eq!(config.api_url, "https://custom:9200");
         assert_eq!(config.api_user, "admin");
-        assert_password_eq(&config.api_password, "secret");
         assert_eq!(config.ca_cert.unwrap(), "/path/to/ca.pem");
         assert_eq!(config.client_cert.unwrap(), "/path/to/cert.pem");
         assert_eq!(config.client_key.unwrap(), "/path/to/key.pem");
@@ -722,24 +707,6 @@ mod tests {
         let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
 
         assert_password_eq(&config.api_password, "from-env");
-    }
-
-    #[test]
-    fn test_cli_wins_over_env_and_credential_store() {
-        let _env = EnvGuard::new();
-        let store = MemoryStore::new();
-        store
-            .set(credential_store::KEY_API_PASSWORD, "from-keychain")
-            .unwrap();
-
-        let env_pw = Zeroizing::new("from-env".to_string());
-        let cli = CliOpts {
-            api_password: Some("from-cli".to_string().into()),
-            ..default_cli_opts()
-        };
-        let config = Config::from_cli_env_and_store(&cli, Some(&env_pw), &store).unwrap();
-
-        assert_password_eq(&config.api_password, "from-cli");
     }
 
     #[test]
