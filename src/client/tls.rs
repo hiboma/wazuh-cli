@@ -121,6 +121,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Handles CA certificates, client certificates (mTLS), and insecure mode.
 pub fn build_http_client(config: &Config) -> Result<Client, WazuhError> {
     let mut builder = Client::builder()
+        .user_agent(concat!("wazuh-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(config.timeout))
         .use_rustls_tls();
 
