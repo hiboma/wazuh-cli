@@ -324,3 +324,91 @@ fn global_options_are_accepted() {
         "Global options should be accepted without error"
     );
 }
+
+/// Options that used to take a secret as their value must fail with
+/// exit code 2 and must not echo the value back (stderr may be logged).
+#[test]
+fn removed_secret_options_fail_without_echoing_the_value() {
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["--api-password", "hunter2-secret", "agent", "list"],
+        vec!["-p", "hunter2-secret", "agent", "list"],
+        vec![
+            "security",
+            "user",
+            "create",
+            "--username",
+            "alice",
+            "--password",
+            "hunter2-secret",
+        ],
+        vec![
+            "security",
+            "user",
+            "update",
+            "101",
+            "--password",
+            "hunter2-secret",
+        ],
+        // Hyphen-prefixed values must not trip clap's "unexpected
+        // argument" error, which would echo part of the value.
+        vec!["-p", "-hunter2-secret", "agent", "list"],
+        vec![
+            "security",
+            "user",
+            "create",
+            "--username",
+            "alice",
+            "--password",
+            "-hunter2-secret",
+        ],
+    ];
+    for args in &cases {
+        let output = wazuh_cli().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "args: {:?}", args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stderr.contains("was removed"),
+            "args: {:?}, stderr: {}",
+            args,
+            stderr
+        );
+        assert!(
+            !stderr.contains("hunter2-secret") && !stdout.contains("hunter2-secret"),
+            "secret echoed for args {:?}: {}",
+            args,
+            stderr
+        );
+    }
+}
+
+#[test]
+fn removed_secret_options_are_hidden_from_help() {
+    let output = wazuh_cli()
+        .args(["security", "user", "create", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--password-stdin"));
+    assert!(help.contains("--password-file"));
+    assert!(!help.contains("--password <"), "help: {}", help);
+    assert!(!help.contains("--api-password"), "help: {}", help);
+}
+
+#[test]
+fn password_stdin_and_password_file_conflict() {
+    let status = wazuh_cli()
+        .args([
+            "security",
+            "user",
+            "create",
+            "--username",
+            "alice",
+            "--password-stdin",
+            "--password-file",
+            "/tmp/pw",
+        ])
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(2));
+}

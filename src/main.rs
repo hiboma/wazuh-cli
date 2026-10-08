@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod error;
 mod output;
+mod secret;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
@@ -76,20 +77,19 @@ fn main() {
         #[cfg(target_os = "macos")]
         Command::Credentials(cmd) => {
             // clap propagates `global = true` unconditionally, so the
-            // API-specific options (--api-url, --api-password, etc.)
+            // API-specific options (--api-url, --ca-cert, etc.)
             // appear on `credentials`'s help even though they have no
             // effect here. Warn loudly if a user passes one so the
             // silent drop does not masquerade as success.
             if cli.global.api_url.is_some()
                 || cli.global.api_user.is_some()
-                || cli.global.api_password.is_some()
                 || cli.global.ca_cert.is_some()
                 || cli.global.client_cert.is_some()
                 || cli.global.client_key.is_some()
                 || cli.global.insecure
             {
                 eprintln!(
-                    "warning: API options (--api-url, --api-password, \
+                    "warning: API options (--api-url, --api-user, \
                      --ca-cert, ...) have no effect on `credentials`. \
                      Use --file / --stdin to provide the value to store."
                 );
@@ -103,14 +103,9 @@ fn main() {
         _ => {}
     }
 
-    // Move the clap-parsed password straight into `Zeroizing` so the
-    // only heap copy under our control is wiped on drop. The argv
-    // copy itself is already exposed via `ps` and we cannot touch
-    // that.
     let cli_opts = CliOpts {
         api_url: cli.global.api_url,
         api_user: cli.global.api_user,
-        api_password: cli.global.api_password.map(zeroize::Zeroizing::new),
         ca_cert: cli.global.ca_cert,
         client_cert: cli.global.client_cert,
         client_key: cli.global.client_key,
