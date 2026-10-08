@@ -198,12 +198,7 @@ fn read_capped(reader: impl Read, label: &str) -> Result<Zeroizing<String>, Wazu
 pub fn read_from_file(path: &Path) -> Result<Zeroizing<String>, WazuhError> {
     let lmeta = fs::symlink_metadata(path).map_err(|e| open_error(path, e))?;
     if lmeta.file_type().is_symlink() {
-        return Err(WazuhError::Config(format!(
-            "{} is a symlink; refusing to follow for secret \
-             material. Pass the real path, or copy the secret \
-             to a regular file.",
-            path.display()
-        )));
+        return Err(symlink_error(path));
     }
     // Reject FIFOs and devices before `open`: opening a FIFO blocks
     // until a writer appears. The fstat check below still applies to
@@ -231,14 +226,29 @@ pub fn read_from_file(path: &Path) -> Result<Zeroizing<String>, WazuhError> {
     read_capped(file, &label)
 }
 
-/// Open `path` for reading. On Windows, `FILE_FLAG_OPEN_REPARSE_POINT`
-/// opens a symlink or junction itself instead of its target, so a link
-/// swapped in after the `lstat` fails the `is_file()` check on the
-/// handle. On Unix the dev/ino comparison in `check_unix_file` covers
-/// the same race.
+/// Open `path` for reading without following a symlink in the final
+/// component and without blocking.
+///
+/// The path can be swapped between the `lstat` in `read_from_file` and
+/// this `open` by anyone who can write to the parent directory. On
+/// Unix, `O_NOFOLLOW` makes `open` fail with `ELOOP` on a symlink
+/// instead of following it, and `O_NONBLOCK` makes opening a FIFO
+/// return immediately instead of waiting for a writer. Without both, a
+/// symlink to a FIFO swapped in after the `lstat` hangs the process
+/// before the fstat checks run. `O_NONBLOCK` has no effect on reads
+/// from a regular file, which is the only kind the caller accepts.
+///
+/// On Windows, `FILE_FLAG_OPEN_REPARSE_POINT` opens a symlink or
+/// junction itself instead of its target, so a link swapped in after
+/// the `lstat` fails the `is_file()` check on the handle.
 fn open_no_follow(path: &Path) -> io::Result<fs::File> {
     let mut opts = fs::OpenOptions::new();
     opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -246,6 +256,15 @@ fn open_no_follow(path: &Path) -> io::Result<fs::File> {
         opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     opts.open(path)
+}
+
+fn symlink_error(path: &Path) -> WazuhError {
+    WazuhError::Config(format!(
+        "{} is a symlink; refusing to follow for secret \
+         material. Pass the real path, or copy the secret \
+         to a regular file.",
+        path.display()
+    ))
 }
 
 fn not_regular_file(path: &Path) -> WazuhError {
@@ -257,6 +276,11 @@ fn not_regular_file(path: &Path) -> WazuhError {
 }
 
 fn open_error(path: &Path, e: io::Error) -> WazuhError {
+    // `O_NOFOLLOW` reports a symlinked final component as `ELOOP`.
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        return symlink_error(path);
+    }
     if e.kind() == io::ErrorKind::NotFound {
         WazuhError::Config(format!(
             "{} does not exist. Double-check the path (shell ~ is \
@@ -298,7 +322,7 @@ fn check_unix_file(
     // the mode check while the plaintext is attacker-controlled.
     //
     // SAFETY: `geteuid` is a direct syscall with no preconditions.
-    let euid = unsafe { geteuid() };
+    let euid = unsafe { libc::geteuid() };
     if meta.uid() != euid {
         return Err(WazuhError::Config(format!(
             "{} is owned by uid {}, not the current euid {}; refuse \
@@ -323,16 +347,6 @@ fn check_unix_file(
         )));
     }
     Ok(())
-}
-
-/// `geteuid()` via a FFI declaration — avoids pulling the `libc`
-/// crate. Stable ABI on every Unix.
-#[cfg(unix)]
-unsafe fn geteuid() -> u32 {
-    unsafe extern "C" {
-        fn geteuid() -> u32;
-    }
-    unsafe { geteuid() }
 }
 
 /// clap value parser for an option that used to take a secret as its
@@ -496,6 +510,49 @@ mod tests {
             "got: {}",
             err
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The race in `read_from_file` (path swapped after the `lstat`)
+    /// cannot be triggered deterministically, so test the `open` it
+    /// relies on directly: it must neither follow a symlink nor block
+    /// on a FIFO.
+    #[cfg(unix)]
+    #[test]
+    fn open_no_follow_refuses_symlink_to_fifo_without_blocking() {
+        let dir = tempdir_in_target();
+        let fifo = dir.join("fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        let err = open_no_follow(&link).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP), "got: {}", err);
+        assert!(
+            open_error(&link, err).to_string().contains("symlink"),
+            "ELOOP should map to the symlink message"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_no_follow_does_not_block_on_fifo() {
+        let dir = tempdir_in_target();
+        let fifo = dir.join("fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        // Without O_NONBLOCK this open waits for a writer forever.
+        let file = open_no_follow(&fifo).unwrap();
+        assert!(!file.metadata().unwrap().is_file());
         fs::remove_dir_all(&dir).ok();
     }
 
