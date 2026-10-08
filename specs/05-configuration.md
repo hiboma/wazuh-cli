@@ -13,6 +13,8 @@ CLI options
   > Default values
 ```
 
+`api_password` has no CLI tier: there is no CLI option for it, because
+an argument value is exposed via `ps`, shell history, and audit/EDR logs.
 The credential store tier only applies to `api_password`. All other
 settings (URL, user, cert paths, timeout, output format, etc.) skip
 the Keychain tier and consult CLI, env var, file, default in that
@@ -83,8 +85,8 @@ falls through to the next tier.
 
 ### Why the file sits below the Keychain for `api_password`
 
-`api_password` is resolved as **CLI > env var > Keychain > file >
-default**. The config file is explicitly below the Keychain because:
+`api_password` is resolved as **env var > Keychain > file >
+default** (the file tier only triggers a warning; see below). The config file is explicitly below the Keychain because:
 
 - A plaintext password in the file defeats the whole point of the
   Keychain backing (it would be included in Time Machine /
@@ -176,4 +178,4 @@ The store returns one of two error classes:
 
 Non-macOS builds compile without the `keyring` / `security-framework`
 dependencies. `credentials` subcommands return an `Unavailable` error,
-and resolution of `api_password` uses only CLI + env var.
+and resolution of `api_password` uses only the env var.

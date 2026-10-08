@@ -46,7 +46,6 @@ fn spec_global_options_accepted() {
     let options = vec![
         ("--api-url", "https://localhost:55000"),
         ("--api-user", "wazuh"),
-        ("--api-password", "wazuh"),
         ("--ca-cert", "/tmp/ca.pem"),
         ("--client-cert", "/tmp/client.pem"),
         ("--client-key", "/tmp/client-key.pem"),

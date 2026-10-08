@@ -34,10 +34,16 @@ Supports environments that require client certificate authentication. mTLS is no
 
 In addition to environment variables, CLI options can also be used. CLI options take precedence over environment variables.
 
+There is no CLI option for the password. A value passed as an argument is
+recorded in shell history and is visible to `ps`, auditd `EXECVE` records,
+and EDR process events, which are often forwarded to a SIEM. The former
+`--api-password` / `-p` option was removed; passing it fails with exit
+code 2 and a message pointing to the alternatives below. The error message
+never echoes the value.
+
 ```
 --api-url <URL>
 --api-user <USER>
---api-password <PASSWORD>
 --ca-cert <PATH>
 --client-cert <PATH>
 --client-key <PATH>
@@ -59,10 +65,9 @@ wazuh-cli credentials status                # shows presence, never the value
 
 Resolution order for the password is:
 
-1. `--api-password` CLI option
-2. `WAZUH_API_PASSWORD` environment variable
-3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
-4. empty (authentication will fail)
+1. `WAZUH_API_PASSWORD` environment variable
+2. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+3. empty (authentication will fail)
 
 When the Keychain is present but an access attempt fails (a denied
 prompt, an ACL mismatch after re-signing the binary), wazuh-cli does
@@ -101,9 +106,12 @@ in `Cargo.toml` at build time.
 
 - Passing the password via the macOS Keychain is preferred; environment
   variables are the next best option.
-- When passing the password via `--api-password`, the value is visible in
-  the process list (`ps`) until the process exits. Prefer the Keychain or
-  the env var.
+- Secrets are never accepted as command-line argument values. This
+  applies to the API password and to user passwords set through
+  `security user create` / `security user update` (see
+  `02-cli-design.md`). When setting `WAZUH_API_PASSWORD`, use
+  `read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD` so that the
+  value does not enter shell history.
 - After resolution, wazuh-cli removes `WAZUH_API_PASSWORD` from its own
   environment so that a subsequent `ps -E` / read of
   `/proc/<pid>/environ` does not see the plaintext for the lifetime of

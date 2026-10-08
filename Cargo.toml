@@ -20,6 +20,12 @@ thiserror = "2"
 toml = "0.9"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW / O_NONBLOCK / ELOOP differ across OSes and CPU
+# architectures (e.g. O_NOFOLLOW on aarch64 Linux), so take them from
+# libc instead of hard-coding. Already in the tree via rpassword and mio.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["apple-native"] }
 # Same major as the version that `keyring`'s apple-native backend pulls

@@ -44,9 +44,23 @@ pub struct GlobalOpts {
     #[arg(long, short = 'u', global = true)]
     pub api_user: Option<String>,
 
-    /// API password
-    #[arg(long, short = 'p', global = true)]
-    pub api_password: Option<String>,
+    /// Removed. Kept hidden only to explain the replacement.
+    #[arg(
+        long = "api-password",
+        short = 'p',
+        global = true,
+        hide = true,
+        // Accept `-p -abc` as a value so clap's "unexpected argument"
+        // error never echoes part of the secret.
+        allow_hyphen_values = true,
+        value_name = "VALUE",
+        value_parser = crate::secret::RemovedSecretOption {
+            flag: "--api-password",
+            guidance: "Set WAZUH_API_PASSWORD (e.g. `read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD`) \
+                       or, on macOS, store it with `wazuh-cli credentials set api-password`.",
+        }
+    )]
+    pub removed_api_password: Option<String>,
 
     /// CA certificate path
     #[arg(long, global = true)]
