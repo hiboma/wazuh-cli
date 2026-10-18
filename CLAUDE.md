@@ -40,16 +40,18 @@ Follow these rules when creating or modifying workflow files in `.github/workflo
 
 ### Action pinning
 
-- Pin all third-party actions by full commit SHA, not by tag. Add a comment with the version tag for readability.
+- Reference third-party actions by a full version tag or a documented branch name. The workflow dependency lockfile pins these references and their transitive dependencies to reviewed commits.
   ```yaml
-  - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+  - uses: actions/checkout@v7.0.1
   ```
+- Run `gh actions-lock` after adding or removing a `uses` dependency or a workflow. Never edit `.github/workflows/actions.lock` by hand.
+- Run `gh actions-lock --verify` to validate the lockfile before committing workflow changes.
 
 ### Credential persistence
 
 - Always set `persist-credentials: false` on every `actions/checkout` step unless the job performs authenticated git operations (push, pull, fetch from private repos, submodule fetch). This prevents `GITHUB_TOKEN` from being written to `.git/config` where any later step or compromised action could exfiltrate it.
   ```yaml
-  - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+  - uses: actions/checkout@v7.0.1
     with:
       persist-credentials: false
   ```

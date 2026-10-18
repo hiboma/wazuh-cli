@@ -10,14 +10,31 @@ permissions:
   contents: read
 
 jobs:
-  deny:
+  actions-lock:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - name: Install actions-lock extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh extension install github/gh-actions-lock --pin v0.2.0
+
+      - name: Verify workflow dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh actions-lock --verify
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
 
   check:
     # Run the full check+clippy+tests matrix on Linux AND macOS so
@@ -32,15 +49,15 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: ${{ matrix.os }}
 
@@ -75,15 +92,15 @@ jobs:
             cross: false
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: ${{ matrix.target }}
 
