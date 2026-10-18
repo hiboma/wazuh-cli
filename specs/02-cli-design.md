@@ -16,12 +16,15 @@ wazuh-cli [global-options] <resource> <action> [arguments] [options]
 |---|---|---|
 | `--api-url <URL>` | | API URL |
 | `--api-user <USER>` | `-u` | API username |
+| `--api-password-stdin` | | Read API password from piped stdin |
+| `--api-password-file <PATH>` | | Read API password from a checked private file |
+| `--secret-output-file <PATH>` | | Export response credentials to a new private Unix file |
 | `--ca-cert <PATH>` | | CA certificate path |
 | `--client-cert <PATH>` | | Client certificate path |
 | `--client-key <PATH>` | | Client private key path |
-| `--insecure` | `-k` | Skip TLS verification |
+| `--insecure` | `-k` | Skip TLS verification for literal loopback IPs only, with a warning |
 | `--output <FORMAT>` | `-o` | Output format (json, table, csv) |
-| `--raw` | | Output API response as-is |
+| `--raw` | | Output full API response structure with credential redaction |
 | `--quiet` | `-q` | Output results only |
 | `--verbose` | `-v` | Verbose output |
 | `--progress` | | Output progress messages to stderr during auto-pagination |
@@ -237,8 +240,8 @@ wazuh-cli list update <filename> --file <path>
 wazuh-cli list delete <filename>
 wazuh-cli list files
 
-wazuh-cli logtest run --log <log_entry> [--session <token>]
-wazuh-cli logtest delete-session <token>
+wazuh-cli logtest run --log <log_entry> [--session-stdin | --session-file <path> | --session-prompt]
+wazuh-cli logtest delete-session [--token-stdin | --token-file <path>]
 
 wazuh-cli task status [--limit <n>]
 
@@ -253,13 +256,26 @@ wazuh-cli api-info
 wazuh-cli completion <shell>   # bash, zsh, fish, elvish, powershell
 ```
 
+API authentication accepts global `--api-password-stdin` or
+`--api-password-file <path>`, with the same secret-file checks as user
+password input. Explicit input takes precedence over the environment and
+Keychain. Two secret inputs cannot share stdin. The environment password
+is captured and removed before argument parsing; removing it does not
+erase the process's original environment memory.
+
+Logtest session tokens never enter argv. Session reuse is optional; the
+explicit `--session-prompt` reads a hidden value. Deletion prompts by
+default. Tokens used in URL paths must contain only ASCII letters, digits,
+underscores, and hyphens. Legacy secret arguments fail without reflecting
+their values. Password prompts never interpolate usernames or user IDs.
+
 The `completion` subcommand does not call the Wazuh API. It prints a shell completion script to stdout and exits. See README.md for installation examples.
 
 ## Output Formats
 
 ### JSON (Default)
 
-Extracts `data.affected_items` and outputs it. When the extracted data is an array, each element is output as a single-line JSON object (JSON Lines format). When the extracted data is not an array, it is output as pretty-printed JSON. When `--raw` is specified, the API response is output as-is in pretty-printed JSON.
+Extracts `data.affected_items` and outputs it. When the extracted data is an array, each element is output as a single-line JSON object (JSON Lines format). When the extracted data is not an array, it is output as pretty-printed JSON. When `--raw` is specified, extraction is skipped and the full response structure is output. Credential redaction applies in both modes. Root arrays use JSON Lines in either mode.
 
 This design enables line-oriented processing with tools such as `jq`, `grep`, and `head`.
 
@@ -317,17 +333,17 @@ By default, `data.affected_items` is extracted and output. The fallback order is
 
 1. If `data.affected_items` exists, it is output.
 2. If `data` exists, it is output.
-3. If neither exists, the original response is output as-is.
+3. If neither exists, the original response structure is output with credential redaction.
 
 When the extracted data is an array, each element is output as a single-line JSON object (JSON Lines format). When the extracted data is not an array (e.g. a single object from `agent get`), it is output as pretty-printed JSON.
 
 ### `--raw` Option
 
-Outputs the API response as-is. This is used when extracting arbitrary fields with `jq`.
+Outputs the full API response structure with credential redaction. This is used when extracting arbitrary non-secret fields with `jq`. Use `--secret-output-file PATH` to preserve newly issued keys or session tokens in a private Unix file.
 
 | Option | Short | Environment Variable | Description |
 |---|---|---|---|
-| `--raw` | | `WAZUH_RAW` | Outputs the API response as-is |
+| `--raw` | | `WAZUH_RAW` | Outputs the full API response structure with credential redaction |
 
 ```
 wazuh-cli agent list --raw

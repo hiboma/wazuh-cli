@@ -185,10 +185,11 @@ On macOS, `WAZUH_API_PASSWORD` can be stored in the login Keychain
 instead of an environment variable. The resolution order for the
 password is:
 
-1. `WAZUH_API_PASSWORD` environment variable
-2. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+1. `--api-password-stdin` or `--api-password-file PATH`
+2. `WAZUH_API_PASSWORD` environment variable
+3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
 
-There is no CLI option for the password: a value passed as an argument
+There is no CLI option accepting a password value: a value passed as an argument
 ends up in shell history and is visible to `ps` and audit/EDR logs. The
 former `--api-password` / `-p` option was removed. To set the env var
 without leaving it in shell history:
@@ -196,6 +197,23 @@ without leaving it in shell history:
 ```bash
 read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD
 ```
+
+Never pass a real value to a removed option: rejecting it cannot remove it
+from process or audit records. The non-reflecting rejection is retained
+through 0.x, with parser removal planned for 1.0. Environment removal at
+startup also cannot erase exec-time capture; stdin/file or Keychain are
+preferred. See [SECURITY.md](SECURITY.md) for remaining memory/logging risks.
+
+API URLs must use HTTPS without userinfo, query or fragment. Redirects are
+not followed. Use `--ca-cert` for private CAs. `--insecure` works only with
+literal loopback IP addresses and warns about interception on each run.
+
+Credential fields are masked on stdout even with `--raw`. To keep a newly
+issued logtest token or enrollment key, use `--secret-output-file PATH`
+with a new path in a private directory (Unix only, mode 0600). The response
+is JSON; extract the desired token into a private file before supplying it
+with `logtest run --session-file PATH` or
+`logtest delete-session --token-file PATH`. stdin variants are also available.
 
 Storing the password in the Keychain keeps it out of plaintext config
 files, dotfile backups, Time Machine snapshots, and shell history, and
@@ -281,9 +299,15 @@ Non-secret settings can be written to a TOML file. Search order:
 3. `$XDG_CONFIG_HOME/wazuh-cli/config.toml`, falling back to
    `~/.config/wazuh-cli/config.toml`
 
+On Unix, configuration files must be regular files owned by the effective
+user, have one hard link, and not be group/world writable. Final symlinks
+are rejected. Protect parent directories as well. Non-Unix builds reject
+configuration files until ownership and ACL checks are implemented; use
+CLI options and environment settings instead.
+
 Within the merge chain, the file sits **below** the Keychain:
 `CLI > env > Keychain (api_password only) > file > default`
-(`api_password` has no CLI tier). So a
+(`api_password` accepts stdin/file selection, never an argument value). So a
 rotated Keychain secret always wins over a stale password someone
 forgot to scrub from `config.toml`.
 
@@ -323,7 +347,7 @@ is optional; when absent, resolution simply falls through.
 | `WAZUH_CA_CERT` | CA certificate file path | (none) |
 | `WAZUH_CLIENT_CERT` | Client certificate file path (mTLS) | (none) |
 | `WAZUH_CLIENT_KEY` | Client private key file path (mTLS) | (none) |
-| `WAZUH_INSECURE` | Skip TLS verification (`true`/`false`) | `false` |
+| `WAZUH_INSECURE` | Skip TLS verification for literal loopback IPs only (`true`/`false`) | `false` |
 | `WAZUH_OUTPUT` | Default output format | `json` |
 | `WAZUH_TIMEOUT` | Request timeout in seconds | `30` |
 
@@ -337,9 +361,12 @@ CLI options override environment variables.
 --ca-cert <PATH>       CA certificate path
 --client-cert <PATH>   Client certificate path
 --client-key <PATH>    Client private key path
---insecure             Skip TLS verification (-k)
+--insecure             Skip TLS verification for literal loopback IPs only (-k)
 --output <FORMAT>      Output format (-o)
---raw                  Output raw API response
+--raw                  Output full API structure with credential redaction
+--api-password-stdin   Read API password from piped stdin
+--api-password-file    Read API password from a private file
+--secret-output-file   Export response credentials to a new private Unix file
 --progress             Show pagination progress on stderr
 ```
 

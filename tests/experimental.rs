@@ -11,6 +11,8 @@ use wazuh_cli::cli::{Cli, Command, experimental::ExperimentalCommand};
 use wazuh_cli::client::WazuhClient;
 use wazuh_cli::config::{Config, OutputFormat};
 
+mod support;
+
 fn parse(args: &[&str]) -> ExperimentalCommand {
     let cli = Cli::try_parse_from(
         ["wazuh-cli", "experimental"]
@@ -131,7 +133,8 @@ struct Expected {
 fn mock(expected: Vec<Expected>) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let url = format!("https://{}", listener.local_addr().unwrap());
+    let tls = support::tls_config();
     let handle = thread::spawn(move || {
         let mut requests = vec![Expected {
             method: "POST",
@@ -142,7 +145,7 @@ fn mock(expected: Vec<Expected>) -> (String, thread::JoinHandle<()>) {
         requests.extend(expected);
         for expected in requests {
             let start = std::time::Instant::now();
-            let mut stream = loop {
+            let stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -155,9 +158,14 @@ fn mock(expected: Vec<Expected>) -> (String, thread::JoinHandle<()>) {
                     Err(e) => panic!("accept failed: {e}"),
                 }
             };
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            let mut stream = rustls::StreamOwned::new(
+                rustls::ServerConnection::new(tls.clone()).unwrap(),
+                stream,
+            );
             let mut bytes = Vec::new();
             let mut buf = [0; 1024];
             while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -218,7 +226,7 @@ async fn client(url: String) -> WazuhClient {
         ca_cert: None,
         client_cert: None,
         client_key: None,
-        insecure: false,
+        insecure: true,
         output_format: OutputFormat::Json,
         raw_output: false,
         progress: false,
@@ -335,7 +343,7 @@ async fn clear_sends_delete_with_explicit_ids_and_request_options() {
 
 #[tokio::test]
 async fn unsupported_and_duplicate_filters_fail_before_authentication() {
-    let client = client("http://127.0.0.1:1".into()).await;
+    let client = client("https://127.0.0.1:1".into()).await;
     for filters in [
         vec!["q=name=openssl"],
         vec!["name=openssl", "name=curl"],

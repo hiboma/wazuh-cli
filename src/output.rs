@@ -3,6 +3,131 @@ use std::io::Write;
 use crate::config::OutputFormat;
 use crate::error::WazuhError;
 
+fn secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("password")
+        || key.contains("token")
+        || key.contains("authorization")
+        || key == "key"
+        || key.ends_with("_key")
+        || key == "secret"
+}
+
+/// Collect sent secrets so a server cannot reflect them under an innocent key.
+pub(crate) fn collect_secrets<'a>(value: &'a serde_json::Value, secrets: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if secret_key(key)
+                    && let Some(value) = value.as_str()
+                {
+                    secrets.push(value);
+                }
+                collect_secrets(value, secrets);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_secrets(item, secrets);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Apply to both values and object keys, including embedded exact matches.
+pub(crate) fn redact_values(value: &mut serde_json::Value, secrets: &[&str]) {
+    fn redact(text: &mut String, secrets: &[&str]) {
+        use zeroize::Zeroize;
+        for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+            if text.contains(secret) {
+                let safe = text.replace(secret, "[REDACTED]");
+                text.zeroize();
+                *text = safe;
+            }
+        }
+    }
+    match value {
+        serde_json::Value::String(text) => redact(text, secrets),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_values(item, secrets);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (mut key, mut item) in std::mem::take(map) {
+                redact(&mut key, secrets);
+                redact_values(&mut item, secrets);
+                map.insert(key, item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn public_response(value: &serde_json::Value) -> serde_json::Value {
+    let mut secrets = Vec::new();
+    collect_secrets(value, &mut secrets);
+    let mut safe = value.clone();
+    redact_values(&mut safe, &secrets);
+    fn mask(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    if secret_key(key) {
+                        *item = serde_json::json!("[REDACTED]");
+                    } else {
+                        mask(item);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    mask(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    mask(&mut safe);
+    safe
+}
+
+/// Explicit secret export preserves newly issued session tokens/enrollment keys.
+/// Never overwrite or follow an existing path. Non-Unix platforms fail closed
+/// until a private ACL can be installed atomically.
+pub fn write_secret_response(
+    path: &std::path::Path,
+    value: &serde_json::Value,
+) -> Result<(), WazuhError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| {
+                WazuhError::Config(
+                    "cannot create secret output file; use a new path in a private directory"
+                        .into(),
+                )
+            })?;
+        serde_json::to_writer(&mut file, value)?;
+        file.write_all(b"\n")?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, value);
+        Err(WazuhError::Config(
+            "secret output files require Unix permission enforcement".into(),
+        ))
+    }
+}
+
 /// Extracts data.affected_items from an API response.
 /// Fallback order: affected_items -> data -> original JSON
 fn extract_data(value: &serde_json::Value) -> &serde_json::Value {
@@ -24,7 +149,8 @@ pub fn print_response(
     _format: OutputFormat,
     raw: bool,
 ) -> Result<(), WazuhError> {
-    let output = if raw { value } else { extract_data(value) };
+    let safe = public_response(value);
+    let output = if raw { &safe } else { extract_data(&safe) };
     let mut stdout = std::io::stdout().lock();
 
     if let Some(items) = output.as_array() {

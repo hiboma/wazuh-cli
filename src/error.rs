@@ -27,7 +27,7 @@ pub enum WazuhError {
     Connection(String),
 
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -37,4 +37,10 @@ pub enum WazuhError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl From<reqwest::Error> for WazuhError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Http(error.without_url())
+    }
 }

@@ -44,6 +44,18 @@ pub struct GlobalOpts {
     #[arg(long, short = 'u', global = true)]
     pub api_user: Option<String>,
 
+    /// Read the API password from stdin (takes precedence over environment and Keychain)
+    #[arg(long, global = true, conflicts_with = "api_password_file")]
+    pub api_password_stdin: bool,
+
+    /// Read the API password from an owner-only regular file
+    #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub api_password_file: Option<PathBuf>,
+
+    /// Save the API response including newly issued secrets to a new owner-only file
+    #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub secret_output_file: Option<PathBuf>,
+
     /// Removed. Kept hidden only to explain the replacement.
     #[arg(
         long = "api-password",
@@ -56,8 +68,7 @@ pub struct GlobalOpts {
         value_name = "VALUE",
         value_parser = crate::secret::RemovedSecretOption {
             flag: "--api-password",
-            guidance: "Set WAZUH_API_PASSWORD (e.g. `read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD`) \
-                       or, on macOS, store it with `wazuh-cli credentials set api-password`.",
+            guidance: "Use --api-password-stdin / --api-password-file, or macOS credentials set api-password.",
         }
     )]
     pub removed_api_password: Option<String>,

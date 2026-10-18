@@ -10,7 +10,7 @@ mod secret;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use std::io::{self, StdoutLock, Write};
-use std::process;
+use std::process::ExitCode;
 
 use cli::{Cli, Command};
 use config::{CliOpts, Config};
@@ -40,23 +40,28 @@ impl Write for BrokenPipeTolerantStdout<'_> {
     }
 }
 
-fn main() {
-    let cli = Cli::parse();
-
+fn main() -> ExitCode {
     // Capture `WAZUH_API_PASSWORD` and immediately scrub it from the
     // process environment, *before* any subcommand dispatch. This
-    // closes the window in which `ps -E` / `/proc/<pid>/environ`
-    // could read the plaintext, and it covers the `credentials`
+    // prevents later environment lookups and child inheritance, but does
+    // not erase the original OS environment memory. It covers credentials
     // subcommand path too (which does not consume the env var but
     // previously left it in place for the duration of the run).
     //
     // SAFETY: single-threaded context; no other thread observes env
     // mutations at this point in startup.
-    let env_api_password: Option<zeroize::Zeroizing<String>> = {
-        let v = std::env::var("WAZUH_API_PASSWORD").ok();
-        unsafe { std::env::remove_var("WAZUH_API_PASSWORD") };
-        v.filter(|s| !s.is_empty()).map(zeroize::Zeroizing::new)
+    let (cli, env_api_password) = match parse_startup(std::env::args_os()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            let code = err.exit_code() as u8;
+            let _ = err.print();
+            return ExitCode::from(code);
+        }
     };
+    if cli.global.api_password_stdin && command_reads_secret_stdin(&cli.command) {
+        eprintln!("error: API password and command secret cannot both read stdin");
+        return ExitCode::from(2);
+    }
 
     // Subcommands that do not talk to the Wazuh API do not need a tokio
     // runtime and must run before any credential resolution that would
@@ -70,9 +75,9 @@ fn main() {
             generate(shell, &mut cmd, bin_name, &mut out);
             if let Err(e) = out.flush() {
                 eprintln!("error: failed to flush stdout: {e}");
-                process::exit(1);
+                return ExitCode::from(1);
             }
-            return;
+            return ExitCode::SUCCESS;
         }
         #[cfg(target_os = "macos")]
         Command::Credentials(cmd) => {
@@ -87,6 +92,8 @@ fn main() {
                 || cli.global.client_cert.is_some()
                 || cli.global.client_key.is_some()
                 || cli.global.insecure
+                || cli.global.api_password_stdin
+                || cli.global.api_password_file.is_some()
             {
                 eprintln!(
                     "warning: API options (--api-url, --api-user, \
@@ -96,13 +103,32 @@ fn main() {
             }
             if let Err(e) = commands::credentials::run(cmd) {
                 output::print_error(&e);
-                process::exit(output::exit_code(&e));
+                return ExitCode::from(output::exit_code(&e) as u8);
             }
-            return;
+            return ExitCode::SUCCESS;
         }
         _ => {}
     }
 
+    let api_password = if cli.global.api_password_stdin || cli.global.api_password_file.is_some() {
+        match secret::read_secret(
+            secret::SecretSource::from_flags(
+                cli.global.api_password_stdin,
+                cli.global.api_password_file.as_deref(),
+            ),
+            "API password (input hidden): ",
+            false,
+        ) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                output::print_error(&e);
+                return ExitCode::from(output::exit_code(&e) as u8);
+            }
+        }
+    } else {
+        env_api_password
+    };
+    let secret_output_file = cli.global.secret_output_file;
     let cli_opts = CliOpts {
         api_url: cli.global.api_url,
         api_user: cli.global.api_user,
@@ -129,7 +155,7 @@ fn main() {
         Ok(v) => v,
         Err(e) => {
             output::print_error(&e);
-            process::exit(output::exit_code(&e));
+            return ExitCode::from(output::exit_code(&e) as u8);
         }
     };
     let file_cfg = loaded_file.as_ref().map(|(_, f)| f);
@@ -140,14 +166,14 @@ fn main() {
     // through explicitly.
     let config = match Config::from_cli_env_store_and_file(
         &cli_opts,
-        env_api_password.as_ref(),
+        api_password.as_ref(),
         config::credential_store::default_store().as_ref(),
         file_cfg,
     ) {
         Ok(c) => c,
         Err(e) => {
             output::print_error(&e);
-            process::exit(output::exit_code(&e));
+            return ExitCode::from(output::exit_code(&e) as u8);
         }
     };
 
@@ -158,7 +184,7 @@ fn main() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("error: failed to build tokio runtime: {e}");
-            process::exit(1);
+            return ExitCode::from(1);
         }
     };
 
@@ -166,17 +192,69 @@ fn main() {
 
     match result {
         Ok(value) => {
+            if let Some(path) = secret_output_file
+                && let Err(e) = output::write_secret_response(&path, &value)
+            {
+                output::print_error(&e);
+                return ExitCode::from(output::exit_code(&e) as u8);
+            }
             if let Err(e) = output::print_response(&value, config.output_format, config.raw_output)
             {
                 output::print_error(&e);
-                process::exit(output::exit_code(&e));
+                return ExitCode::from(output::exit_code(&e) as u8);
             }
         }
         Err(e) => {
             output::print_error(&e);
-            process::exit(output::exit_code(&e));
+            return ExitCode::from(output::exit_code(&e) as u8);
         }
     }
+    ExitCode::SUCCESS
+}
+
+fn command_reads_secret_stdin(command: &Command) -> bool {
+    use cli::other::LogtestAction;
+    use cli::security::{SecurityAction, SecurityUserAction};
+    match command {
+        Command::Security(cmd) => match &cmd.action {
+            SecurityAction::User(cmd) => match &cmd.action {
+                SecurityUserAction::Create { password, .. }
+                | SecurityUserAction::Update { password, .. } => password.password_stdin,
+                _ => false,
+            },
+            _ => false,
+        },
+        Command::Logtest(cmd) => match &cmd.action {
+            LogtestAction::Run { session_stdin, .. } => *session_stdin,
+            LogtestAction::DeleteSession { token_stdin, .. } => *token_stdin,
+        },
+        #[cfg(target_os = "macos")]
+        Command::Credentials(cmd) => matches!(
+            cmd.action,
+            cli::credentials::CredentialsAction::Set { stdin: true, .. }
+        ),
+        _ => false,
+    }
+}
+
+/// Must be called before argument parsing and before starting worker threads.
+fn capture_env_password() -> Option<zeroize::Zeroizing<String>> {
+    let value = std::env::var("WAZUH_API_PASSWORD").ok();
+    // SAFETY: main invokes this before any worker threads are created.
+    unsafe { std::env::remove_var("WAZUH_API_PASSWORD") };
+    value.filter(|s| !s.is_empty()).map(zeroize::Zeroizing::new)
+}
+
+/// Capture before parsing, including help, version and argument errors.
+/// Call only during single-threaded process startup.
+fn parse_startup<I, T>(args: I) -> Result<(Cli, Option<zeroize::Zeroizing<String>>), clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let password = capture_env_password();
+    let cli = Cli::try_parse_from(args)?;
+    Ok((cli, password))
 }
 
 async fn run(command: Command, config: &Config) -> Result<serde_json::Value, error::WazuhError> {
@@ -206,5 +284,70 @@ async fn run(command: Command, config: &Config) -> Result<serde_json::Value, err
         Command::Completion { .. } => unreachable!("handled before run()"),
         #[cfg(target_os = "macos")]
         Command::Credentials(_) => unreachable!("handled before run()"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_scrubs_environment_before_all_parser_exit_paths() {
+        fn isolated_test() -> std::process::Command {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "tests::capture_scrubs_environment_before_all_parser_exit_paths",
+                "--test-threads=1",
+            ]);
+            command
+        }
+
+        let case = std::env::var("WAZUH_TEST_CAPTURE_CHILD").ok();
+        let Some(case) = case else {
+            for case in ["help", "version", "invalid", "success"] {
+                let status = isolated_test()
+                    .env("WAZUH_TEST_CAPTURE_CHILD", case)
+                    .env("WAZUH_API_PASSWORD", "test-only-marker")
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            return;
+        };
+        if case == "observe" {
+            // This process inherits the environment without an explicit removal.
+            assert!(std::env::var_os("WAZUH_API_PASSWORD").is_none());
+            return;
+        }
+        let argument = match case.as_str() {
+            "help" => "--help",
+            "version" => "--version",
+            "invalid" => "invalid-command",
+            "success" => "api-info",
+            _ => panic!("unexpected test case"),
+        };
+        let result = parse_startup(["wazuh-cli", argument]);
+        match case.as_str() {
+            "success" => {
+                let (_, password) = result.unwrap();
+                assert_eq!(password.unwrap().as_str(), "test-only-marker");
+            }
+            "help" => assert_eq!(
+                result.err().unwrap().kind(),
+                clap::error::ErrorKind::DisplayHelp
+            ),
+            "version" => assert_eq!(
+                result.err().unwrap().kind(),
+                clap::error::ErrorKind::DisplayVersion
+            ),
+            _ => assert!(result.is_err()),
+        }
+        assert!(std::env::var_os("WAZUH_API_PASSWORD").is_none());
+        let status = isolated_test()
+            .env("WAZUH_TEST_CAPTURE_CHILD", "observe")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

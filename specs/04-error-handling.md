@@ -44,7 +44,8 @@ Errors when API authentication fails.
 - 401 Unauthorized (invalid credentials)
 - 403 Forbidden (insufficient permissions)
 
-**Response**: Output the HTTP status and the API error message, then exit with exit code 1.
+**Response**: Output the HTTP status, withhold the untrusted response body,
+and exit with exit code 1. Authentication errors never echo a request URL.
 
 ### 5. API Errors
 
@@ -56,7 +57,8 @@ Errors when the API returns an error response.
 - 429 Too Many Requests
 - 500 Internal Server Error
 
-**Response**: Output the HTTP status and the API error message, then exit with exit code 1.
+**Response**: Output the HTTP status and a fixed diagnostic, then exit with
+exit code 1. Response bodies can reflect credentials and are not displayed.
 
 ### 6. Partial Success
 
@@ -76,6 +78,18 @@ When the `error` field in the API response is `2` (partial success).
 The `completion` subcommand never calls the Wazuh API and therefore always exits with 0 on success or 2 when clap rejects an unknown shell.
 
 ## Error Output Format
+
+Transport errors discard request URLs. Configuration parse errors report
+only a fixed diagnostic and location, never source snippets or parser text.
+Successful responses redact sent passwords/JWTs/session tokens by exact
+value, including occurrences in JSON keys. Terminal output additionally
+masks password/token/authorization/secret/key fields and their reflected
+values, including with `--raw`. Newly issued session tokens and enrollment
+keys are available only through explicit `--secret-output-file PATH`, a
+new private Unix file (0600); existing files are never overwritten. Store
+this file in a private directory and delete it when no longer needed.
+This is not a general defense against an API deliberately encoding or
+transforming secrets: the configured API remains a trusted peer.
 
 Errors are output to standard error (stderr). When `--output json` is specified, errors are also output in JSON format.
 

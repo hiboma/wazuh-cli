@@ -57,16 +57,38 @@ pub enum LogtestAction {
         #[arg(long)]
         log: String,
 
-        /// Session token for multi-step testing
+        /// Read a session token from stdin for multi-step testing
+        #[arg(long, conflicts_with_all = ["session_file", "session_prompt"])]
+        session_stdin: bool,
+        /// Read a session token from an owner-only regular file
+        #[arg(long, conflicts_with = "session_prompt")]
+        session_file: Option<std::path::PathBuf>,
+        /// Read a session token using a hidden prompt
         #[arg(long)]
-        session: Option<String>,
+        session_prompt: bool,
+        #[arg(long = "session", hide = true, allow_hyphen_values = true,
+            value_parser = crate::secret::RemovedSecretOption {
+                flag: "--session",
+                guidance: "Use --session-stdin / --session-file / --session-prompt.",
+            })]
+        removed_session: Option<String>,
     },
 
     /// Delete a logtest session
     #[command(name = "delete-session")]
     DeleteSession {
-        /// Session token
-        token: String,
+        /// Read the session token from stdin instead of a hidden prompt
+        #[arg(long, conflicts_with = "token_file")]
+        token_stdin: bool,
+        /// Read the session token from an owner-only regular file
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+        #[arg(hide = true, allow_hyphen_values = true,
+            value_parser = crate::secret::RemovedSecretOption {
+                flag: "positional token",
+                guidance: "Use --token-stdin / --token-file, or omit to be prompted.",
+            })]
+        removed_token: Option<String>,
     },
 }
 

@@ -1,7 +1,15 @@
 use std::process::Command;
 
 fn wazuh_cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_wazuh-cli"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wazuh-cli"));
+    // Parser conformance must never read a developer's Keychain or API config.
+    cmd.env("WAZUH_API_PASSWORD", "conformance-test-password")
+        .env_remove("WAZUH_API_URL")
+        .env_remove("WAZUH_API_USER")
+        .env_remove("WAZUH_CONFIG")
+        .arg("--config")
+        .arg("/nonexistent/wazuh-cli-conformance.toml");
+    cmd
 }
 
 #[test]
@@ -333,6 +341,23 @@ fn removed_secret_options_fail_without_echoing_the_value() {
         vec!["--api-password", "hunter2-secret", "agent", "list"],
         vec!["-p", "hunter2-secret", "agent", "list"],
         vec![
+            "logtest",
+            "run",
+            "--log",
+            "example",
+            "--session",
+            "hunter2-secret",
+        ],
+        vec![
+            "logtest",
+            "run",
+            "--log",
+            "example",
+            "--session=-hunter2-secret",
+        ],
+        vec!["logtest", "delete-session", "hunter2-secret"],
+        vec!["logtest", "delete-session", "-hunter2-secret"],
+        vec![
             "security",
             "user",
             "create",
@@ -392,7 +417,7 @@ fn removed_secret_options_are_hidden_from_help() {
     assert!(help.contains("--password-stdin"));
     assert!(help.contains("--password-file"));
     assert!(!help.contains("--password <"), "help: {}", help);
-    assert!(!help.contains("--api-password"), "help: {}", help);
+    assert!(!help.contains("--api-password <"), "help: {}", help);
 }
 
 #[test]
@@ -411,4 +436,63 @@ fn password_stdin_and_password_file_conflict() {
         .status()
         .unwrap();
     assert_eq!(status.code(), Some(2));
+}
+
+#[test]
+fn api_password_stdin_cannot_share_stdin_with_command_secret() {
+    for command in [
+        vec![
+            "security",
+            "user",
+            "create",
+            "--username",
+            "alice",
+            "--password-stdin",
+        ],
+        vec!["security", "user", "update", "101", "--password-stdin"],
+        vec!["logtest", "run", "--log", "example", "--session-stdin"],
+        vec!["logtest", "delete-session", "--token-stdin"],
+    ] {
+        let output = wazuh_cli()
+            .arg("--api-password-stdin")
+            .args(command)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot both read stdin"));
+    }
+}
+
+#[test]
+fn api_password_sources_conflict_and_empty_stdin_is_rejected() {
+    let output = wazuh_cli()
+        .args([
+            "--api-password-stdin",
+            "--api-password-file",
+            "/unused",
+            "agent",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let output = wazuh_cli()
+        .args(["--api-password-stdin", "agent", "list"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("empty value"));
+}
+
+#[test]
+fn early_parser_exits_never_print_environment_password() {
+    for args in [vec!["--help"], vec!["--version"], vec!["not-a-command"]] {
+        let output = wazuh_cli()
+            .env("WAZUH_API_PASSWORD", "environment-secret-marker")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("environment-secret-marker"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("environment-secret-marker"));
+    }
 }

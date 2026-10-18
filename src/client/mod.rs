@@ -135,7 +135,7 @@ impl WazuhClient {
         )
         .await?;
 
-        let token: CachedToken = Arc::new(Zeroizing::new(raw));
+        let token: CachedToken = Arc::new(raw);
         let mut guard = self.token.lock().unwrap();
         *guard = Some(Arc::clone(&token));
         Ok(token)
@@ -158,8 +158,11 @@ impl WazuhClient {
             Err(WazuhError::Api { status: 401, .. }) => {
                 // On 401, retry authentication once
                 let new_token = self.refresh_token().await?;
-                self.send_request(new_token.as_str(), method, path, query, body)
-                    .await
+                let mut response = self
+                    .send_request(new_token.as_str(), method, path, query, body)
+                    .await?;
+                crate::output::redact_values(&mut response, &[token.as_str()]);
+                Ok(response)
             }
             other => other,
         }
@@ -190,13 +193,20 @@ impl WazuhClient {
         let status = response.status();
 
         if status.is_success() {
-            let json: Value = response.json().await?;
+            let mut json: Value = response.json().await?;
+            let mut secrets = vec![self.credentials.password.as_str(), token];
+            if let Some(session) = path.strip_prefix("/logtest/sessions/") {
+                secrets.push(session);
+            }
+            if let Some(body) = body {
+                crate::output::collect_secrets(body, &mut secrets);
+            }
+            crate::output::redact_values(&mut json, &secrets);
             Ok(json)
         } else {
-            let body_text = response.text().await.unwrap_or_default();
             Err(WazuhError::Api {
                 status: status.as_u16(),
-                message: body_text,
+                message: "request failed; response body withheld".into(),
             })
         }
     }
