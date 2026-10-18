@@ -85,14 +85,14 @@ jobs:
 
       - name: Upload artifact (unix)
         if: runner.os != 'Windows'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: wazuh-cli-${{ matrix.target }}
           path: wazuh-cli-${{ matrix.target }}.tar.gz
 
       - name: Upload artifact (windows)
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: wazuh-cli-${{ matrix.target }}
           path: wazuh-cli-${{ matrix.target }}.zip
