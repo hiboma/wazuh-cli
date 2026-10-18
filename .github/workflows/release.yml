@@ -8,7 +8,14 @@ on:
 permissions: {}
 
 jobs:
+  # Local reusable workflows run from the caller's commit, including tag pushes.
+  security-gate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-checks.yml
+
   build-release:
+    needs: security-gate
     permissions:
       contents: read
       id-token: write
