@@ -65,8 +65,8 @@ pub struct Credentials {
     pub password: Zeroizing<String>,
 }
 
-/// Hand-written `Debug` that masks the password. `Zeroizing`'s own
-/// `Debug` prints the wrapped value, so we cannot rely on deriving.
+/// Hand-written `Debug` that masks the password while retaining an explicit
+/// distinction between an empty password and a configured password.
 impl fmt::Debug for Credentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Credentials")
