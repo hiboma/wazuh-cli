@@ -26,6 +26,30 @@ brew install hiboma/tap/wazuh-cli
 
 Download the latest release from [GitHub Releases](https://github.com/hiboma/wazuh-cli/releases) and place the binary in your `$PATH`.
 
+#### Verify release provenance
+
+Releases produced by the reusable `release-build.yml` workflow attest the archives
+and `sha256sums.txt` with GitHub artifact attestations before publication. Earlier
+releases may use the previous signer workflow or have no attestation.
+
+With an authenticated [GitHub CLI](https://cli.github.com/), verify a downloaded
+archive against the release tag's commit and the expected build workflow:
+
+```bash
+TAG=vX.Y.Z # Replace with the release tag to verify.
+ARTIFACT=wazuh-cli-aarch64-apple-darwin.tar.gz # Choose your platform.
+COMMIT=$(git rev-parse "${TAG}^{commit}") # In a checkout with this tag fetched.
+gh attestation verify "$ARTIFACT" \
+  --repo hiboma/wazuh-cli \
+  --source-digest "$COMMIT" \
+  --signer-digest "$COMMIT" \
+  --signer-workflow hiboma/wazuh-cli/.github/workflows/release-build.yml
+```
+
+The same command can verify `sha256sums.txt`. Verification checks the artifact's
+digest, source commit, and signer workflow; it does not guarantee that the code is
+free of vulnerabilities or that rebuilding produces identical bytes.
+
 ### Build from source
 
 ```bash
