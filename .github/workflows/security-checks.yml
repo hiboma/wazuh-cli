@@ -1,0 +1,74 @@
+name: Security checks
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  windows-config:
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify unsupported config files fail closed
+        run: cargo test --locked --lib config::file::platform_tests
+
+  deny:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+
+  check:
+    permissions:
+      contents: read
+    # macOS also exercises the platform-specific credential store.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.os }}
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-targets -- --test-threads=1
+
+  coverage:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: coverage
+      - name: Install coverage tool
+        run: cargo install cargo-llvm-cov --locked
+      - name: Enforce coverage floor
+        run: cargo llvm-cov --locked --lib --summary-only --fail-under-lines 40 -- --test-threads=1

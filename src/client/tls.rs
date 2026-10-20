@@ -120,7 +120,25 @@ fn base64_encode(data: &[u8]) -> String {
 /// Builds a reqwest::Client from Config.
 /// Handles CA certificates, client certificates (mTLS), and insecure mode.
 pub fn build_http_client(config: &Config) -> Result<Client, WazuhError> {
+    let url = validate_api_url(&config.api_url)?;
+    if config.insecure {
+        let loopback = url.host_str().is_some_and(|host| {
+            host.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !loopback {
+            return Err(WazuhError::Config(
+                "TLS verification may only be disabled for a literal loopback IP address".into(),
+            ));
+        }
+        eprintln!(
+            "warning: TLS certificate verification is disabled; API passwords, JWTs and request secrets can be intercepted. Use a trusted CA certificate."
+        );
+    }
     let mut builder = Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("wazuh-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(config.timeout))
         .use_rustls_tls();
@@ -181,6 +199,33 @@ pub fn build_http_client(config: &Config) -> Result<Client, WazuhError> {
         .map_err(|e| WazuhError::Tls(format!("Failed to build HTTP client: {}", e)))
 }
 
+/// Validate before credentials can reach any request. Never echo the input.
+pub fn validate_api_url(value: &str) -> Result<reqwest::Url, WazuhError> {
+    let invalid = || {
+        WazuhError::Config(
+            "API URL must be HTTPS with a host and without userinfo, query or fragment".into(),
+        )
+    };
+    let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    // Also reject empty userinfo, which Url normalizes away.
+    let authority = value
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || authority.contains('@')
+        || value.chars().any(char::is_control)
+    {
+        return Err(invalid());
+    }
+    Ok(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +257,7 @@ mod tests {
     #[test]
     fn test_build_insecure_client() {
         let mut config = test_config();
+        config.api_url = "https://127.0.0.1:55000".into();
         config.insecure = true;
         let result = build_http_client(&config);
         assert!(result.is_ok());

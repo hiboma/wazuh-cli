@@ -13,9 +13,11 @@
 //! (warning + ignored) to push users toward the Keychain.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use crate::error::WazuhError;
 
@@ -34,16 +36,23 @@ pub struct ConfigFile {
     pub request: RequestSection,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiSection {
     pub url: Option<String>,
     pub user: Option<String>,
-    /// Present only so we can recognize it and warn. Reading the
-    /// plaintext here defeats the purpose of the Keychain backing —
-    /// we refuse to use the value and tell the user to run
-    /// `wazuh-cli credentials set api-password` instead.
-    pub password: Option<String>,
+    /// Recognize the deprecated field without keeping its plaintext value.
+    pub password: Option<serde::de::IgnoredAny>,
+}
+
+impl std::fmt::Debug for ApiSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiSection")
+            .field("url", &self.url.as_ref().map(|_| "[redacted]"))
+            .field("user", &self.user.as_ref().map(|_| "[redacted]"))
+            .field("password_present", &self.password.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,7 +107,8 @@ pub fn find_config_path(
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     let candidate = base.join("wazuh-cli").join("config.toml");
-    if candidate.exists() {
+    if !matches!(fs::symlink_metadata(&candidate), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
         Some(candidate)
     } else {
         None
@@ -121,16 +131,23 @@ pub fn load(
         return Ok(None);
     };
 
-    match fs::read_to_string(&path) {
+    match read_config(&path) {
         Ok(text) => {
             let file: ConfigFile = toml::from_str(&text).map_err(|e| {
+                let offset = e.span().map(|span| span.start).unwrap_or(0).min(text.len());
+                let prefix = &text.as_bytes()[..offset];
+                let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
+                let column = prefix
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(offset + 1, |last| offset - last);
                 WazuhError::Config(format!(
-                    "failed to parse config file {}: {}",
+                    "failed to parse config file {} at line {}, column {}: invalid configuration",
                     path.display(),
-                    e
+                    line,
+                    column
                 ))
             })?;
-            warn_on_insecure_mode(&path);
             warn_on_password_field(&path, &file);
             Ok(Some((path, file)))
         }
@@ -146,34 +163,97 @@ pub fn load(
     }
 }
 
-/// Warn (but do NOT refuse) when the config file is group/world
-/// readable. The file is expected to contain non-secret settings
-/// (URL, user, cert paths); the Keychain holds `api_password`. If
-/// the user writes a plaintext password anyway and the file is
-/// group-readable, we want that failure mode to be loud but we do
-/// not want to break non-sensitive configs behind the same fence.
-#[cfg(unix)]
-fn warn_on_insecure_mode(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = fs::metadata(path) {
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            eprintln!(
-                "warning: {} has mode {:o} (group/world accessible). \
-                 This is tolerable for non-secret settings, but do NOT \
-                 store secrets here; use \
-                 `wazuh-cli credentials set api-password` instead. \
-                 Consider `chmod 600 {}`.",
-                path.display(),
-                mode,
-                path.display()
-            );
-        }
-    }
+fn invalid_file(message: &'static str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::PermissionDenied, message)
 }
 
-#[cfg(not(unix))]
-fn warn_on_insecure_mode(_path: &Path) {}
+const CONFIG_MAX_BYTES: usize = 1024 * 1024;
+
+fn read_config(path: &Path) -> std::io::Result<Zeroizing<String>> {
+    read_config_after_check(path, || {})
+}
+
+// The hook permits deterministic testing of replacement between lstat and open.
+fn read_config_after_check(
+    path: &Path,
+    after_check: impl FnOnce(),
+) -> std::io::Result<Zeroizing<String>> {
+    let before = fs::symlink_metadata(path)?;
+    if !before.is_file() || before.file_type().is_symlink() {
+        return Err(invalid_file("config must be a regular file, not a symlink"));
+    }
+    after_check();
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+    }
+    let file = options.open(path)?;
+    let meta = file.metadata()?;
+    validate_config_metadata(&before, &meta)?;
+    let mut bytes = Zeroizing::new(Vec::with_capacity(CONFIG_MAX_BYTES + 1));
+    file.take((CONFIG_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > CONFIG_MAX_BYTES {
+        return Err(invalid_file("config exceeds 1 MiB"));
+    }
+    let text = match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(text) => Zeroizing::new(text),
+        Err(error) => {
+            let _bytes = Zeroizing::new(error.into_bytes());
+            return Err(invalid_file("config is not valid UTF-8"));
+        }
+    };
+    Ok(text)
+}
+
+fn validate_config_metadata(before: &fs::Metadata, meta: &fs::Metadata) -> std::io::Result<()> {
+    if !meta.is_file() {
+        return Err(invalid_file("config must be a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != meta.dev() || before.ino() != meta.ino() {
+            return Err(invalid_file("config changed while being opened"));
+        }
+        // SAFETY: geteuid has no preconditions and does not modify process state.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(invalid_file("config must be owned by the effective user"));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(invalid_file("config must not be group/world writable"));
+        }
+        if meta.nlink() != 1 {
+            return Err(invalid_file("config must have exactly one hard link"));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = before;
+        Err(invalid_file(
+            "configuration files require Unix ownership checks; use CLI options and environment settings on this platform",
+        ))
+    }
+    #[cfg(unix)]
+    Ok(())
+}
+
+#[cfg(all(test, not(unix)))]
+mod platform_tests {
+    #[test]
+    fn rejects_config_without_platform_trust_checks() {
+        let metadata = std::fs::metadata(std::env::current_exe().unwrap()).unwrap();
+        assert!(super::validate_config_metadata(&metadata, &metadata).is_err());
+    }
+}
 
 fn warn_on_password_field(path: &Path, file: &ConfigFile) {
     if file.api.password.is_some() {
@@ -254,7 +334,10 @@ clinet_cert = "/oops.pem"
         );
         let err = load(Some(&path), None).unwrap_err();
         match err {
-            WazuhError::Config(msg) => assert!(msg.contains("clinet_cert"), "got: {}", msg),
+            WazuhError::Config(msg) => {
+                assert!(msg.contains("invalid configuration"));
+                assert!(!msg.contains("clinet_cert"));
+            }
             other => panic!("expected Config error, got {:?}", other),
         }
     }
@@ -311,12 +394,7 @@ clinet_cert = "/oops.pem"
     }
 
     #[test]
-    fn password_field_triggers_warning_but_is_accessible() {
-        // The warning goes to stderr (hard to assert here without
-        // capturing). The important invariant for the merge layer is
-        // that `file.api.password` is `Some` so the merge step knows
-        // to IGNORE it — the field exists in the struct precisely so
-        // we can detect its presence.
+    fn password_field_is_detected_without_retaining_value() {
         let path = write_tmp_toml(
             r#"
 [api]
@@ -324,6 +402,103 @@ password = "plaintext-leak"
 "#,
         );
         let (_, file) = load(Some(&path), None).unwrap().unwrap();
-        assert_eq!(file.api.password.as_deref(), Some("plaintext-leak"));
+        assert!(file.api.password.is_some());
+        assert!(!format!("{file:?}").contains("plaintext-leak"));
+    }
+
+    #[test]
+    fn parser_diagnostics_never_echo_secret_values_or_unknown_keys() {
+        for contents in [
+            "[api]\npassword = \"SENTINEL_SECRET",
+            "[api]\nSENTINEL_SECRET = true",
+            "[request]\ntimeout = \"SENTINEL_SECRET\"",
+        ] {
+            let path = write_tmp_toml(contents);
+            let error = load(Some(&path), None).unwrap_err();
+            assert!(!format!("{error:?}").contains("SENTINEL_SECRET"));
+            assert!(error.to_string().contains("line"));
+        }
+    }
+
+    #[test]
+    fn config_debug_hides_unvalidated_url() {
+        let path = write_tmp_toml("[api]\nurl = 'https://SENTINEL_SECRET@host/'");
+        let (_, cfg) = load(Some(&path), None).unwrap().unwrap();
+        assert!(!format!("{cfg:?}").contains("SENTINEL_SECRET"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_readable_but_rejects_writable_shared_config() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = write_tmp_toml("");
+        for mode in [0o600, 0o644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(load(Some(&path), None).is_ok());
+        }
+        for mode in [0o620, 0o602, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(load(Some(&path), None).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_links_directory_and_fifo() {
+        use std::os::unix::fs::symlink;
+        let path = write_tmp_toml("");
+        let dir = path.parent().unwrap();
+        let link = dir.join("symlink");
+        symlink(&path, &link).unwrap();
+        assert!(load(Some(&link), None).is_err());
+        assert!(load(Some(dir), None).is_err());
+        let fifo = dir.join("fifo");
+        let cpath = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: cpath is a valid nul-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+        assert!(load(Some(&fifo), None).is_err());
+        fs::hard_link(&path, dir.join("hardlink")).unwrap();
+        assert!(load(Some(&path), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_another_users_file_metadata() {
+        use std::os::unix::fs::MetadataExt;
+        // /etc/passwd is a readable regular file owned by root on supported
+        // Unix platforms. No ownership changes or elevated privileges needed.
+        let meta = fs::metadata("/etc/passwd").unwrap();
+        // SAFETY: geteuid has no preconditions.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            let error = validate_config_metadata(&meta, &meta).unwrap_err();
+            assert!(error.to_string().contains("effective user"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_path_replacement_between_check_and_open() {
+        for replace_with_symlink in [false, true] {
+            let path = write_tmp_toml("");
+            let replacement = write_tmp_toml("[api]\nurl = 'https://attacker.invalid'");
+            let result = read_config_after_check(&path, || {
+                fs::remove_file(&path).unwrap();
+                if replace_with_symlink {
+                    std::os::unix::fs::symlink(&replacement, &path).unwrap();
+                } else {
+                    fs::rename(&replacement, &path).unwrap();
+                }
+            });
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_and_oversized_config() {
+        let path = write_tmp_toml("");
+        fs::write(&path, [0xff]).unwrap();
+        assert!(load(Some(&path), None).is_err());
+        fs::write(&path, vec![b' '; CONFIG_MAX_BYTES + 1]).unwrap();
+        assert!(load(Some(&path), None).is_err());
     }
 }

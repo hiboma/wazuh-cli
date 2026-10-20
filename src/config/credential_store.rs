@@ -65,6 +65,12 @@ impl std::error::Error for StoreError {}
 
 pub trait CredentialStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, StoreError>;
+    /// Presence checks must wipe any plaintext returned by the backend.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn contains(&self, key: &str) -> Result<bool, StoreError> {
+        let value = self.get(key)?.map(zeroize::Zeroizing::new);
+        Ok(value.is_some())
+    }
     /// Only the `credentials` subcommand writes, and that subcommand is
     /// macOS-only. Keep the methods on the trait for every platform so
     /// the abstraction stays whole when a Linux backend is added.

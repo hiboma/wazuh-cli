@@ -14,7 +14,25 @@ use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 
 use clap::builder::TypedValueParser;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+/// Wipe owned JSON strings when a secret request completes, fails, or is cancelled.
+pub struct SecretJson(pub serde_json::Value);
+
+impl Drop for SecretJson {
+    fn drop(&mut self) {
+        wipe_json(&mut self.0);
+    }
+}
+
+fn wipe_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(s) => s.zeroize(),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(wipe_json),
+        serde_json::Value::Object(items) => items.values_mut().for_each(wipe_json),
+        _ => {}
+    }
+}
 
 use crate::error::WazuhError;
 
@@ -384,6 +402,14 @@ impl TypedValueParser for RemovedSecretOption {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn json_wipe_covers_nested_strings() {
+        let mut value = serde_json::json!({"password": "secret", "nested": [{"token": "token"}]});
+        wipe_json(&mut value);
+        assert_eq!(value["password"], "");
+        assert_eq!(value["nested"][0]["token"], "");
+    }
 
     #[test]
     fn strip_trailing_newline_handles_lf() {

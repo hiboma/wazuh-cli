@@ -55,7 +55,7 @@ pub struct Config {
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
-            .field("api_url", &self.api_url)
+            .field("api_url", &"(redacted)")
             .field("api_user", &self.api_user)
             .field(
                 "api_password",
@@ -147,6 +147,7 @@ impl Config {
             file_cfg.and_then(|f| f.api.url.as_deref()),
             Some("https://localhost:55000"),
         )?;
+        crate::client::tls::validate_api_url(&api_url)?;
 
         let api_user = resolve_string(
             cli.api_user.as_deref(),
@@ -802,7 +803,7 @@ mod tests {
             api: file::ApiSection {
                 url: None,
                 user: None,
-                password: Some("plaintext-in-file".to_string()),
+                password: Some(serde::de::IgnoredAny),
             },
             ..Default::default()
         };

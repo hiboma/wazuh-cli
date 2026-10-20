@@ -13,8 +13,9 @@ CLI options
   > Default values
 ```
 
-`api_password` has no CLI tier: there is no CLI option for it, because
-an argument value is exposed via `ps`, shell history, and audit/EDR logs.
+`api_password` accepts an explicit stdin/file source through CLI flags,
+but never a password argument value, which would be exposed via `ps`,
+shell history, and audit/EDR logs.
 The credential store tier only applies to `api_password`. All other
 settings (URL, user, cert paths, timeout, output format, etc.) skip
 the Keychain tier and consult CLI, env var, file, default in that
@@ -30,9 +31,9 @@ order.
 | `WAZUH_CA_CERT` | File path to the CA certificate | (none) |
 | `WAZUH_CLIENT_CERT` | File path to the client certificate | (none) |
 | `WAZUH_CLIENT_KEY` | File path to the client private key | (none) |
-| `WAZUH_INSECURE` | Skip TLS verification (`true`/`false`) | `false` |
+| `WAZUH_INSECURE` | Skip TLS verification for literal loopback IPs only (`true`/`false`) | `false` |
 | `WAZUH_OUTPUT` | Default output format | `json` |
-| `WAZUH_RAW` | Output API response as-is (`true`/`false`) | `false` |
+| `WAZUH_RAW` | Output full API response structure with credential redaction (`true`/`false`) | `false` |
 | `WAZUH_PROGRESS` | Progress messages during auto-pagination (`true`/`false`) | `false` |
 | `WAZUH_TIMEOUT` | Request timeout (seconds) | `30` |
 
@@ -85,8 +86,9 @@ falls through to the next tier.
 
 ### Why the file sits below the Keychain for `api_password`
 
-`api_password` is resolved as **env var > Keychain > file >
-default** (the file tier only triggers a warning; see below). The config file is explicitly below the Keychain because:
+`api_password` is resolved as **explicit stdin/file input > env var >
+Keychain > empty default**. The configuration file's password field only
+triggers a warning and is never used because:
 
 - A plaintext password in the file defeats the whole point of the
   Keychain backing (it would be included in Time Machine /
@@ -101,13 +103,23 @@ default** (the file tier only triggers a warning; see below). The config file is
 
 ### File permissions
 
-On startup, `wazuh-cli` warns to stderr if the config file has any
-of `0o077` bits set (group or world accessible). The warning is
-informational: the file is expected to contain non-secret settings,
-and breaking non-sensitive configs behind the same fence would be
-too aggressive. The warning is load-bearing if the user writes a
-secret there anyway — in which case the log line tells them to use
-`credentials set api-password` instead.
+Configuration controls where credentials are sent, so untrusted files
+are rejected before parsing. Files must be regular files, must not be
+symlinks, and on Unix must belong to the effective UID, have one hard
+link, and have no group/world write bits (`0o022`). Read-only sharing
+is allowed; use mode `0600` if the file contains private settings.
+The descriptor is opened without following a final symlink or blocking
+on a FIFO; its identity and metadata are checked before reading.
+Configuration input is limited to 1 MiB and the read buffer is wiped
+on drop. Parent directories must also be protected from other users;
+these checks do not defend against processes running as the same UID.
+On non-Unix systems, configuration files are rejected because ownership
+and ACL enforcement are not implemented. Use CLI options and environment
+settings instead.
+
+Parse errors report only the path and line/column, never parser messages
+or source excerpts. The deprecated `[api] password` field is detected
+without retaining its value in the parsed configuration.
 
 ### Prototype phase note (historical)
 
@@ -177,5 +189,6 @@ The store returns one of two error classes:
 ### Non-macOS
 
 Non-macOS builds compile without the `keyring` / `security-framework`
-dependencies. `credentials` subcommands return an `Unavailable` error,
-and resolution of `api_password` uses only the env var.
+dependencies and do not expose the `credentials` subcommand.
+`api_password` uses explicit stdin/file input first, then the environment
+variable. No OS credential store is available on these platforms.

@@ -12,7 +12,12 @@ The following authentication is required to access the Wazuh API.
 
 ### Standard TLS (Required)
 
-The Wazuh API uses HTTPS (port 55000) by default. For self-signed certificates, either specify a CA certificate for verification or skip verification.
+The Wazuh API requires HTTPS. Base URLs containing userinfo, query, or
+fragment are rejected. Redirects are never followed, including same-origin
+redirects. For self-signed certificates, specify a CA certificate.
+`--insecure` is restricted to literal loopback IP addresses (127.0.0.0/8 or
+::1), and emits a warning on every client construction. DNS names, including
+localhost, cannot opt out of certificate verification.
 
 ### mTLS (Mutual TLS Authentication) - Optional
 
@@ -24,17 +29,18 @@ Supports environments that require client certificate authentication. mTLS is no
 |---|---|---|
 | `WAZUH_API_URL` | API URL (e.g., `https://localhost:55000`) | Yes |
 | `WAZUH_API_USER` | API username | Yes |
-| `WAZUH_API_PASSWORD` | API password | Yes |
+| `WAZUH_API_PASSWORD` | API password (alternative to stdin/file or Keychain) | No |
 | `WAZUH_CA_CERT` | File path to the CA certificate | No |
 | `WAZUH_CLIENT_CERT` | File path to the client certificate (mTLS) | No |
 | `WAZUH_CLIENT_KEY` | File path to the client private key (mTLS) | No |
-| `WAZUH_INSECURE` | Skip TLS verification (`true`/`false`) | No |
+| `WAZUH_INSECURE` | Skip TLS verification for literal loopback IPs only (`true`/`false`) | No |
 
 ### CLI Options
 
 In addition to environment variables, CLI options can also be used. CLI options take precedence over environment variables.
 
-There is no CLI option for the password. A value passed as an argument is
+Use `--api-password-stdin` or `--api-password-file PATH` to select a secret
+input source. No option accepts a password value as an argument. Such a value is
 recorded in shell history and is visible to `ps`, auditd `EXECVE` records,
 and EDR process events, which are often forwarded to a SIEM. The former
 `--api-password` / `-p` option was removed; passing it fails with exit
@@ -44,6 +50,8 @@ never echoes the value.
 ```
 --api-url <URL>
 --api-user <USER>
+--api-password-stdin
+--api-password-file <PATH>
 --ca-cert <PATH>
 --client-cert <PATH>
 --client-key <PATH>
@@ -65,9 +73,10 @@ wazuh-cli credentials status                # shows presence, never the value
 
 Resolution order for the password is:
 
-1. `WAZUH_API_PASSWORD` environment variable
-2. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
-3. empty (authentication will fail)
+1. Explicit `--api-password-stdin` or `--api-password-file PATH` input
+2. `WAZUH_API_PASSWORD` environment variable
+3. macOS Keychain (service `dev.wazuh-cli`, account `api_password`)
+4. empty (authentication will fail)
 
 When the Keychain is present but an access attempt fails (a denied
 prompt, an ACL mismatch after re-signing the binary), wazuh-cli does
@@ -104,20 +113,21 @@ in `Cargo.toml` at build time.
 
 ### Security Considerations
 
-- Passing the password via the macOS Keychain is preferred; environment
-  variables are the next best option.
+- Prefer macOS Keychain or stdin/private-file input to environment variables,
+  which can be captured at process startup.
 - Secrets are never accepted as command-line argument values. This
   applies to the API password and to user passwords set through
   `security user create` / `security user update` (see
   `02-cli-design.md`). When setting `WAZUH_API_PASSWORD`, use
   `read -s WAZUH_API_PASSWORD; export WAZUH_API_PASSWORD` so that the
   value does not enter shell history.
-- After resolution, wazuh-cli removes `WAZUH_API_PASSWORD` from its own
-  environment so that a subsequent `ps -E` / read of
-  `/proc/<pid>/environ` does not see the plaintext for the lifetime of
-  the process.
-- The resolved password is zeroized on process exit (via `Drop` on the
-  client credential struct), and input to `credentials set` is kept in
+- Before argument parsing, wazuh-cli removes `WAZUH_API_PASSWORD` from its
+  environment to prevent inheritance by subsequent child processes. This
+  cannot erase shell history, exec-time auditing, or the OS's initial
+  environment memory. Prefer password file/stdin input or Keychain.
+- The resolved password is zeroized when its owning value is dropped,
+  including on normal return from main. Abort, forced termination and
+  dependency-owned copies are not covered. Input to `credentials set` is kept in
   `zeroize::Zeroizing<String>` from stdin/tty through the Keychain
   store call.
 - `Config`'s `Debug` impl masks the password as `***` (or `(empty)` when

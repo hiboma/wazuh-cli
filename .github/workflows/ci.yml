@@ -6,11 +6,12 @@ on:
   pull_request:
     branches: [main]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   actions-lock:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -27,51 +28,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh actions-lock --verify
 
-  deny:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
-
-  check:
-    # Run the full check+clippy+tests matrix on Linux AND macOS so
-    # the macOS-only Keychain/credential-store code (`keyring`,
-    # `security-framework`, `classify_keyring_err` OSStatus tests,
-    # `credentials` subcommand) actually exercises on CI. The
-    # earlier Ubuntu-only setup left those paths verified only by
-    # local developer runs.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          key: ${{ matrix.os }}
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Run tests
-        run: cargo test --lib -- --test-threads=1
+  security-gate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/security-checks.yml
 
   build:
-    needs: check
+    needs: security-gate
     permissions:
       contents: read
     uses: ./.github/workflows/release-build.yml

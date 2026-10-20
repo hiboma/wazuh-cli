@@ -75,12 +75,12 @@ fn print_status(store: &dyn CredentialStore, json: bool) -> Result<(), WazuhErro
     let mut saw_error = false;
     let mut all_missing = true;
     for field in fields {
-        match store.get(field.key()) {
-            Ok(Some(_)) => {
+        match store.contains(field.key()) {
+            Ok(true) => {
                 println!("{}\tstored", field.display());
                 all_missing = false;
             }
-            Ok(None) => println!("{}\tnot-stored", field.display()),
+            Ok(false) => println!("{}\tnot-stored", field.display()),
             Err(e) => {
                 // Sanitize the error text: any TAB / CR / LF in it
                 // would silently break the 3-column TSV invariant
@@ -124,12 +124,12 @@ fn print_status_json(
         // key in `entries` is also the hyphenated CLI arg value so
         // `.entries["api-password"].state` works without a
         // conversion table on the caller side.
-        let (state, err) = match store.get(field.key()) {
-            Ok(Some(_)) => {
+        let (state, err) = match store.contains(field.key()) {
+            Ok(true) => {
                 any_stored = true;
                 ("stored", None)
             }
-            Ok(None) => ("not-stored", None),
+            Ok(false) => ("not-stored", None),
             Err(e) => {
                 saw_error = true;
                 ("error", Some(e.to_string()))
@@ -195,4 +195,143 @@ fn store_err_with_guidance(e: StoreError) -> WazuhError {
 #[allow(dead_code)]
 fn _ensure_field_key(_: CredentialField) -> &'static str {
     KEY_API_PASSWORD
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::credential_store::{FailingStore, MemoryStore};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const SENTINEL: &str = "credential-command-secret-SENTINEL";
+    const CHILD_CASE: &str = "WAZUH_TEST_CREDENTIAL_OUTPUT_CASE";
+
+    #[test]
+    fn credential_commands_do_not_print_stored_or_submitted_secrets() {
+        // Capture the actual println!/eprintln! output in an isolated test
+        // process. All stores are injected; no test opens the real Keychain.
+        if let Ok(case) = std::env::var(CHILD_CASE) {
+            exercise_command(&case);
+            return;
+        }
+        for case in [
+            "set",
+            "set-error",
+            "missing-tsv",
+            "stored-tsv",
+            "error-tsv",
+            "missing-json",
+            "stored-json",
+            "error-json",
+        ] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::credentials::tests::credential_commands_do_not_print_stored_or_submitted_secrets",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_CASE, case)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            // Do not include captured output in assertions: a regression
+            // must not cause even the test harness to print a secret.
+            assert!(!stdout.contains(SENTINEL), "stdout leaked in {case}");
+            assert!(!stderr.contains(SENTINEL), "stderr leaked in {case}");
+            assert!(output.status.success(), "child failed in {case}");
+            if case == "set" {
+                assert!(stdout.contains("Stored api-password in credential store"));
+                assert!(stderr.contains("Verify with: wazuh-cli credentials status"));
+            } else if case == "set-error" {
+                assert!(!stdout.contains("Stored api-password"));
+                assert!(stderr.contains("simulated backend failure"));
+                assert!(stderr.contains(ACL_GUIDANCE));
+            } else {
+                let state = if case.starts_with("missing") {
+                    "not-stored"
+                } else if case.starts_with("stored") {
+                    "stored"
+                } else {
+                    "error"
+                };
+                if case.ends_with("json") {
+                    // The test harness adds its own lines around the command.
+                    let start = stdout.find('{').unwrap();
+                    let end = stdout.rfind('}').unwrap() + 1;
+                    let value: serde_json::Value =
+                        serde_json::from_str(&stdout[start..end]).unwrap();
+                    assert_eq!(value["entries"]["api-password"]["state"], state);
+                    assert_eq!(value["ok"], state != "error");
+                    assert_eq!(
+                        value["service"],
+                        crate::config::credential_store::KEYCHAIN_SERVICE
+                    );
+                    assert_eq!(
+                        value["entries"]["api-password"]["error"].is_string(),
+                        state == "error"
+                    );
+                } else {
+                    let start = stdout.find("api-password\t").unwrap();
+                    let row = stdout[start..].lines().next().unwrap();
+                    let columns: Vec<_> = row.split('\t').collect();
+                    assert_eq!(columns[1], state);
+                    assert_eq!(columns.len(), if state == "error" { 3 } else { 2 });
+                }
+                assert_eq!(stderr.contains(ACL_GUIDANCE), state == "error");
+                assert_eq!(
+                    stderr.contains("No credentials stored yet"),
+                    state == "not-stored"
+                );
+            }
+        }
+    }
+
+    fn exercise_command(case: &str) {
+        let memory = MemoryStore::new();
+        let failing = FailingStore::backend();
+        if case.starts_with("set") {
+            let path = std::env::temp_dir().join(format!(
+                "wazuh-credential-command-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            writeln!(file, "{SENTINEL}").unwrap();
+            drop(file);
+            let store: &dyn CredentialStore = if case == "set-error" {
+                &failing
+            } else {
+                &memory
+            };
+            let result = set_value(store, CredentialField::ApiPassword, false, Some(&path));
+            std::fs::remove_file(path).unwrap();
+            if case == "set-error" {
+                crate::output::print_error(&result.unwrap_err());
+            } else {
+                result.unwrap();
+                assert!(memory.get(KEY_API_PASSWORD).unwrap().as_deref() == Some(SENTINEL));
+            }
+        } else {
+            if case.starts_with("stored") {
+                memory.set(KEY_API_PASSWORD, SENTINEL).unwrap();
+            }
+            let store: &dyn CredentialStore = if case.starts_with("error") {
+                &failing
+            } else {
+                &memory
+            };
+            print_status(store, case.ends_with("json")).unwrap();
+        }
+    }
 }
