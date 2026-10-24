@@ -1,7 +1,25 @@
 use std::process::Command;
 
+/// Spawn the binary isolated from the developer's environment.
+///
+/// Tests that get past argument parsing reach credential resolution.
+/// Without isolation the binary would read the API password from the
+/// macOS login Keychain (prompting for access), load the real
+/// `~/.config/wazuh-cli/config.toml`, and inherit `WAZUH_*` variables
+/// that point at a live manager. A dummy `WAZUH_API_PASSWORD` stops the
+/// Keychain lookup, and the URL points at a closed local port so no
+/// request leaves the machine.
 fn wazuh_cli() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_wazuh-cli"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_wazuh-cli"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("WAZUH_") {
+            cmd.env_remove(key);
+        }
+    }
+    cmd.env("XDG_CONFIG_HOME", env!("CARGO_TARGET_TMPDIR"))
+        .env("WAZUH_API_PASSWORD", "test-password-not-a-secret")
+        .env("WAZUH_API_URL", "https://127.0.0.1:9");
+    cmd
 }
 
 #[test]
